@@ -1,0 +1,19 @@
+[project]
+name = "control-room"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Per", email = "123196452+noxaur@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "websockets>=17.2",
+]
+
+[project.scripts]
+control-room = "control_room:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
