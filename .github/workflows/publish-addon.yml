@@ -1,0 +1,24 @@
+# Publiserer kun addon-mappen til branchen `addon`, slik at den kan brukes
+# som git submodule direkte i addons/ i et Godot-prosjekt.
+name: Publish addon branch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - godot/addons/control_room_client/**
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Split addon into its own branch
+        run: |
+          git subtree split --prefix=godot/addons/control_room_client -b addon
+          git push origin addon:addon --force
