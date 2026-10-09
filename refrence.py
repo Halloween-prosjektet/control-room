@@ -96,6 +96,7 @@ class Client:
                 "key": key,
                 "value": value,
                 "pi": pi,
+                "timestamp": self._get_timestamp(),
             }
         )
 
