@@ -4,9 +4,16 @@ WebSocket-klient for kontrollrommet. Port av `refrence.py`. Krever Godot 4.x.
 
 ## Installasjon
 
-Kopier mappen `addons/control_room_client/` inn i `addons/` i prosjektet ditt
-(eller legg den inn som git submodule). Aktivering under
-*Project Settings → Plugins* er valgfritt; klassen er tilgjengelig uansett.
+Anbefalt (får oppdateringer via git), kjør i prosjektets rotmappe:
+
+```sh
+git submodule add -b addon https://github.com/halloween-prosjektet/control-room.git addons/control_room_client
+```
+
+Oppdater senere med `git submodule update --remote addons/control_room_client`.
+Se hoved-README-en for detaljer. Du kan også bare kopiere mappen inn i `addons/`.
+Aktivering under *Project Settings → Plugins* er valgfritt; klassen er
+tilgjengelig uansett.
 
 ## Bruk
 
