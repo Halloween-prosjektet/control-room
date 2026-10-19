@@ -5,6 +5,11 @@
 //   the event, and ignores (but acks) an event with a seq it has already processed.
 // - `error` has `event: "error"`; the name of the failing event is in `event_name`.
 // - `register` is an alias of `player_register`.
+// - `player_incoming` and `player_left` carry `id` (the outbox entry id, a positive
+//   integer). The client echoes it in `player_incoming_ok` and `player_left_ok`. The
+//   server then removes only the outbox entry with that id. An ok for an unknown id
+//   has no effect (but the seq is acked). An ok without `id` (old client) removes the
+//   oldest open entry of that event for the Pi.
 
 export type PiId = 1 | 2 | 3 | 4 | 5;
 export const PI_IDS: readonly PiId[] = [1, 2, 3, 4, 5];
@@ -58,9 +63,13 @@ export interface ShareEvent extends AppBase {
 }
 export interface PlayerIncomingOkEvent extends AppBase {
   event: "player_incoming_ok";
+  /** The `id` of the player_incoming. Undefined for old clients. */
+  id?: number;
 }
 export interface PlayerLeftOkEvent extends AppBase {
   event: "player_left_ok";
+  /** The `id` of the player_left. Undefined for old clients. */
+  id?: number;
 }
 
 export type AppEvent =
@@ -117,8 +126,13 @@ export type ServerMessage =
   | { event: "game_finish_wait"; max_wait: string }
   | { event: "player_leave_ok" }
   | { event: "share_ok" }
-  | { event: "player_incoming"; username: string; player_data: { [key: string]: Json } }
-  | { event: "player_left"; username: string }
+  | {
+      event: "player_incoming";
+      id: number;
+      username: string;
+      player_data: { [key: string]: Json };
+    }
+  | { event: "player_left"; id: number; username: string }
   | { event: "ack"; seq: number }
   | { event: "error"; code: ErrorCode; message: string; event_name: string };
 
@@ -133,12 +147,21 @@ export const msg = {
   }),
   playerLeaveOk: (): ServerMessage => ({ event: "player_leave_ok" }),
   shareOk: (): ServerMessage => ({ event: "share_ok" }),
-  playerIncoming: (username: string, playerData: { [key: string]: Json }): ServerMessage => ({
+  playerIncoming: (
+    id: number,
+    username: string,
+    playerData: { [key: string]: Json },
+  ): ServerMessage => ({
     event: "player_incoming",
+    id,
     username,
     player_data: playerData,
   }),
-  playerLeft: (username: string): ServerMessage => ({ event: "player_left", username }),
+  playerLeft: (id: number, username: string): ServerMessage => ({
+    event: "player_left",
+    id,
+    username,
+  }),
   ack: (seq: number): ServerMessage => ({ event: "ack", seq }),
   error: (code: ErrorCode, message: string, eventName: string): ServerMessage => ({
     event: "error",
@@ -169,6 +192,11 @@ export function isJson(v: unknown, depth = 0): v is Json {
 
 export function isValidSeq(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
+}
+
+/** An outbox message id: a positive safe integer (same rule as seq). */
+export function isValidOutboxId(v: unknown): v is number {
+  return isValidSeq(v);
 }
 
 // ---------------------------------------------------------------- parsing
@@ -260,9 +288,16 @@ export function parseClientObject(data: unknown): ParseResult {
     case "player_leave":
       return withSeq<PlayerLeaveEvent>({ event: "player_leave" });
     case "player_incoming_ok":
-      return withSeq<PlayerIncomingOkEvent>({ event: "player_incoming_ok" });
-    case "player_left_ok":
-      return withSeq<PlayerLeftOkEvent>({ event: "player_left_ok" });
+    case "player_left_ok": {
+      const e: PlayerIncomingOkEvent | PlayerLeftOkEvent = { event: name };
+      if ("id" in data && data.id !== undefined && data.id !== null) {
+        if (!isValidOutboxId(data.id)) {
+          return fail("bad_request", "id must be a positive integer", seq);
+        }
+        e.id = data.id;
+      }
+      return withSeq(e);
+    }
     case "share": {
       const key = data.key;
       if (typeof key !== "string" || key.length < 1 || key.length > SHARE_KEY_MAX) {

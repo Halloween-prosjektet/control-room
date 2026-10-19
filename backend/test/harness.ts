@@ -129,11 +129,18 @@ export class Sim {
   share(pi: PiId, key: string, value: unknown, target: unknown = null) {
     return this.ev(pi, { event: "share", key, value, pi: target, timestamp: this.ts() });
   }
-  incomingOk(pi: PiId) {
-    return this.ev(pi, { event: "player_incoming_ok" });
+  /** player_incoming_ok; with `id` like the current client, without it like an old client. */
+  incomingOk(pi: PiId, id?: number) {
+    return this.ev(
+      pi,
+      id === undefined ? { event: "player_incoming_ok" } : { event: "player_incoming_ok", id },
+    );
   }
-  leftOk(pi: PiId) {
-    return this.ev(pi, { event: "player_left_ok" });
+  leftOk(pi: PiId, id?: number) {
+    return this.ev(
+      pi,
+      id === undefined ? { event: "player_left_ok" } : { event: "player_left_ok", id },
+    );
   }
 
   /** outbox.ts wrote all open entries for a Pi (or all Pis). Returns the messages. */

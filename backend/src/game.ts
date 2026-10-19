@@ -103,9 +103,10 @@ export interface PiDelivery {
   /** Highest seq processed for this Pi (0 = none). Events with seq <= lastSeq are ignored but acked. */
   lastSeq: number;
   /**
-   * Number of player_incoming_ok messages to ignore. Increments when a sent but not
-   * acked player_incoming is deleted because the player quit (the late ok must not
-   * remove the player_incoming of the next run).
+   * Number of player_incoming_ok messages without `id` (old clients) to ignore.
+   * Increments when a sent but not acked player_incoming is deleted because the
+   * player quit (the late ok must not remove the player_incoming of the next run).
+   * An ok with `id` sets it to 0: that client does not send oks without `id`.
    */
   staleIncomingOks: number;
 }
@@ -291,12 +292,19 @@ class Ctx {
     return t.ms;
   }
 
-  outboxAdd(pi: PiId, event: OutboxEvent, payload: ServerMessage, playerId: string): void {
+  /** `payload` gets the id of the new entry (player_incoming and player_left carry it). */
+  outboxAdd(
+    pi: PiId,
+    event: OutboxEvent,
+    payload: (id: number) => ServerMessage,
+    playerId: string,
+  ): void {
+    const id = this.s.nextOutboxId++;
     const entry: OutboxEntry = {
-      id: this.s.nextOutboxId++,
+      id,
       pi,
       event,
-      payload,
+      payload: payload(id),
       needsAck: event !== "game_finish_ok",
       playerId,
       createdAt: this.now,
@@ -404,11 +412,12 @@ class Ctx {
     from.playerId = null;
     from.lastLeft = playerId;
     from.notified = false;
-    this.outboxAdd(room, "game_finish_ok", msg.gameFinishOk(), playerId);
+    this.outboxAdd(room, "game_finish_ok", () => msg.gameFinishOk(), playerId);
+    const data = this.playerData(run, to.room);
     this.outboxAdd(
       to.room,
       "player_incoming",
-      msg.playerIncoming(run.username, this.playerData(run, to.room)),
+      (id) => msg.playerIncoming(id, run.username, data),
       playerId,
     );
     this.roomEmptied(room);
@@ -485,10 +494,10 @@ class Ctx {
         this.onShare(pi, e);
         break;
       case "player_incoming_ok":
-        this.onIncomingOk(pi);
+        this.onIncomingOk(pi, e.id);
         break;
       case "player_left_ok":
-        this.onLeftOk(pi);
+        this.onLeftOk(pi, e.id);
         break;
     }
   }
@@ -587,7 +596,7 @@ class Ctx {
       slot.lastLeft = run.playerId;
       slot.notified = false;
       this.log("info", `run ${run.playerId} completed in ${total} ms`);
-      this.outboxAdd(5, "game_finish_ok", msg.gameFinishOk(), run.playerId);
+      this.outboxAdd(5, "game_finish_ok", () => msg.gameFinishOk(), run.playerId);
       this.roomEmptied(5);
       return;
     }
@@ -623,7 +632,8 @@ class Ctx {
     this.dropIncoming(room, playerId, pi !== room);
     if (wasIncoming && room >= 2) {
       if (slot.notified && pi !== room) {
-        this.outboxAdd(room, "player_left", msg.playerLeft(run.username), playerId);
+        const username = run.username;
+        this.outboxAdd(room, "player_left", (id) => msg.playerLeft(id, username), playerId);
       }
     }
     // The Pi that sends player_leave does not need a pending game_finish_ok for this run.
@@ -670,9 +680,31 @@ class Ctx {
     this.send(pi, msg.shareOk());
   }
 
-  /** 8.10: an ack removes the oldest player_incoming for the Pi. */
-  onIncomingOk(pi: PiId): void {
+  /**
+   * 8.10: an ok with `id` removes only the outbox entry with that id (if it is an open
+   * message of this event for this Pi). An ok for an unknown id has no effect. An ok
+   * without `id` (old client) removes the oldest open message of this event for the Pi.
+   */
+  ackedEntry(pi: PiId, event: OutboxEvent, id: number): OutboxEntry | null {
+    const entry = this.s.outbox.find((x) => x.id === id);
+    if (!entry || entry.pi !== pi || entry.event !== event) {
+      this.log("info", `pi ${pi}: ${event}_ok for id ${id} with no open ${event}`);
+      return null;
+    }
+    return entry;
+  }
+
+  onIncomingOk(pi: PiId, id: number | undefined): void {
     const d = this.pi(pi);
+    if (id !== undefined) {
+      d.staleIncomingOks = 0;
+      const entry = this.ackedEntry(pi, "player_incoming", id);
+      if (!entry) return;
+      this.outboxRemove(entry.id);
+      const slot = this.slot(pi);
+      if (slot.playerId === entry.playerId) slot.notified = true;
+      return;
+    }
     if (d.staleIncomingOks > 0) {
       d.staleIncomingOks -= 1;
       this.log("info", `pi ${pi}: ignored player_incoming_ok for a run that quit`);
@@ -688,7 +720,12 @@ class Ctx {
     if (slot.playerId === entry.playerId) slot.notified = true;
   }
 
-  onLeftOk(pi: PiId): void {
+  onLeftOk(pi: PiId, id: number | undefined): void {
+    if (id !== undefined) {
+      const entry = this.ackedEntry(pi, "player_left", id);
+      if (entry) this.outboxRemove(entry.id);
+      return;
+    }
     const entry = this.s.outbox.find((x) => x.pi === pi && x.event === "player_left");
     if (!entry) {
       this.log("info", `pi ${pi}: player_left_ok with no open player_left`);

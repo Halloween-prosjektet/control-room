@@ -123,6 +123,16 @@ describe("parse: game_start, game_finish, leave, oks", () => {
       expect(ok(`{"event":"${e}","extra":1}`)).toEqual({ event: e } as never);
     }
   });
+  test("oks with id", () => {
+    for (const e of ["player_incoming_ok", "player_left_ok"]) {
+      expect(ok(`{"event":"${e}","id":12,"seq":3}`)).toEqual({ event: e, id: 12, seq: 3 } as never);
+      expect(ok(`{"event":"${e}","id":null}`)).toEqual({ event: e } as never);
+      for (const bad of ['"12"', "0", "-1", "1.5", "[1]", "1e300"]) {
+        const r = parseClientMessage(`{"event":"${e}","id":${bad},"seq":4}`);
+        expect(r).toMatchObject({ ok: false, code: "bad_request", eventName: e, seq: 4 });
+      }
+    }
+  });
 });
 
 describe("parse: share", () => {
@@ -198,12 +208,13 @@ describe("builders", () => {
     expect(msg.gameFinishWait("x")).toEqual({ event: "game_finish_wait", max_wait: "x" });
     expect(msg.playerLeaveOk()).toEqual({ event: "player_leave_ok" });
     expect(msg.shareOk()).toEqual({ event: "share_ok" });
-    expect(msg.playerIncoming("u", { a: 1 })).toEqual({
+    expect(msg.playerIncoming(7, "u", { a: 1 })).toEqual({
       event: "player_incoming",
+      id: 7,
       username: "u",
       player_data: { a: 1 },
     });
-    expect(msg.playerLeft("u")).toEqual({ event: "player_left", username: "u" });
+    expect(msg.playerLeft(8, "u")).toEqual({ event: "player_left", id: 8, username: "u" });
     expect(msg.ack(4)).toEqual({ event: "ack", seq: 4 });
     expect(msg.error("room_busy", "m", "player_register")).toEqual({
       event: "error",

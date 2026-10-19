@@ -10,7 +10,7 @@
 //   the highest processed seq. Events with no ack are sent again after the next
 //   `auth_ok`, before the events in the queue.
 // - `player_incoming` and `player_left` get `player_incoming_ok` and
-//   `player_left_ok`.
+//   `player_left_ok`. The ok echoes the `id` of the message (when it has one).
 // - When the connection closes, it connects again (1 s, 2 s, 4 s ... max 10 s).
 //   Close code 4001 (auth refused) stops the program.
 //
@@ -156,6 +156,11 @@ function randomHex(bytes: number): string {
 }
 
 /** ISO 8601 with the local offset, for example 2026-10-31T19:56:21.624+01:00. */
+/** An ok event that echoes the `id` of the server message (when it has one). */
+function okWithId(event: string, id: Json | undefined): Msg {
+  return typeof id === "number" ? { event, id } : { event };
+}
+
 function timestamp(d = new Date()): string {
   const pad = (n: number, w = 2) => String(Math.abs(n)).padStart(w, "0");
   const off = -d.getTimezoneOffset();
@@ -309,11 +314,11 @@ class FakePi {
           username: String(msg.username ?? ""),
           player_data: msg.player_data ?? {},
         };
-        this.sendEvent({ event: "player_incoming_ok" });
+        this.sendEvent(okWithId("player_incoming_ok", msg.id));
         break;
       case "player_left":
         this.player = null;
-        this.sendEvent({ event: "player_left_ok" });
+        this.sendEvent(okWithId("player_left_ok", msg.id));
         break;
       case "game_finish_ok":
       case "player_leave_ok":

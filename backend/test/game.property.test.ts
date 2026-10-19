@@ -1,6 +1,10 @@
 // Randomised property test: five Pis send random event sequences (fixed seeds).
 // After every step the invariants below must hold. At the end, a "drain" phase
 // plays all remaining runs to the end, to show that no run gets stuck.
+//
+// The Pis echo the `id` of player_incoming / player_left in most oks. They also send
+// random duplicate and late oks for ids they received before. Such an ok must never
+// remove an outbox entry other than the one with that id.
 
 import { describe, expect, test } from "bun:test";
 import type { Effect } from "../src/game.ts";
@@ -114,6 +118,8 @@ function checkInvariants(ctx: Ctx, effects: Effect[], hadSeq: number | undefined
     check(sim.db.runs.has(e.playerId), `outbox entry for unknown run ${e.playerId}`);
     check(e.payload.event === e.event, "payload event");
     check(e.needsAck === (e.event !== "game_finish_ok"), "needsAck");
+    if (e.payload.event === "player_incoming" || e.payload.event === "player_left")
+      check(e.payload.id === e.id, "payload id is not the outbox id");
     if (e.event === "player_incoming") {
       check(s.runs[e.playerId] !== undefined, "player_incoming for a run that is not active");
       check(
@@ -168,6 +174,36 @@ function runSeed(seed: number) {
     const seq = noSeq ? undefined : (sim.seq[pi - 1] as number) + 1;
     doStep(() => sim.ev(pi, data, noSeq ? false : undefined), seq);
   };
+  /** Every copy of player_incoming / player_left that each Pi got (in order). */
+  const received: { id: number; event: string }[][] = [[], [], [], [], []];
+  const sendOut = (ids: number[]) => {
+    for (const e of sim.state.outbox) {
+      if (ids.includes(e.id) && e.needsAck) received[e.pi - 1]?.push({ id: e.id, event: e.event });
+    }
+    doStep(() => sim.apply({ type: "outbox_sent", ids }), undefined);
+  };
+  /** An ok with `id`: it can only remove the entry with that id. */
+  const idOk = (pi: PiId, event: string, id: number) => {
+    const ok = event === "player_left" ? "player_left_ok" : "player_incoming_ok";
+    const target = sim.state.outbox.find((x) => x.id === id);
+    const seq = (sim.seq[pi - 1] as number) + 1;
+    doStep(() => {
+      const fx = sim.ev(pi, { event: ok, id });
+      const removed = fx.flatMap((x) => (x.type === "outbox_remove" ? [x.id] : []));
+      for (const rid of removed) {
+        if (rid !== id) fail(ctx, `${ok} id ${id} removed entry ${rid}`);
+      }
+      const match = target !== undefined && target.pi === pi && target.event === event;
+      if (removed.length !== (match ? 1 : 0)) fail(ctx, `${ok} id ${id} removed ${removed}`);
+      return fx;
+    }, seq);
+  };
+  /** Acks an open entry like the Godot client: mostly with `id`, sometimes without. */
+  const ackEntry = (pi: PiId, e: { id: number; event: string }) => {
+    if (rand() < 0.15)
+      app(pi, { event: e.event === "player_left" ? "player_left_ok" : "player_incoming_ok" });
+    else idOk(pi, e.event, e.id);
+  };
 
   for (let i = 0; i < STEPS; i++) {
     if (rand() < 0.3) sim.advance(Math.floor(rand() * 120_000));
@@ -183,7 +219,7 @@ function runSeed(seed: number) {
       app(1, { event: "player_register", username: pick(NAMES), timestamp: sim.ts() });
     } else if (smart && sim.outboxFor(pi).some((e) => e.sent && e.needsAck)) {
       const e = sim.outboxFor(pi).find((x) => x.sent && x.needsAck);
-      app(pi, { event: e?.event === "player_left" ? "player_left_ok" : "player_incoming_ok" });
+      if (e) ackEntry(pi, e);
     } else {
       const kind = rand();
       if (kind < 0.12)
@@ -202,12 +238,21 @@ function runSeed(seed: number) {
           pi: target,
           timestamp: sim.ts(),
         });
-      } else if (kind < 0.6) app(pi, { event: "player_incoming_ok" });
-      else if (kind < 0.64) app(pi, { event: "player_left_ok" });
-      else if (kind < 0.82) {
+      } else if (kind < 0.56) app(pi, { event: "player_incoming_ok" });
+      else if (kind < 0.58) app(pi, { event: "player_left_ok" });
+      else if (kind < 0.64) {
+        // A duplicate or late ok for a copy that the Pi got before (or a random id,
+        // or the wrong ok event for the id).
+        const got = received[pi - 1] ?? [];
+        const old = got.length > 0 && rand() < 0.85 ? pick(got) : undefined;
+        if (old && rand() < 0.9) idOk(pi, old.event, old.id);
+        else if (old)
+          idOk(pi, old.event === "player_left" ? "player_incoming" : "player_left", old.id);
+        else
+          idOk(pi, rand() < 0.5 ? "player_left" : "player_incoming", 1 + Math.floor(rand() * 40));
+      } else if (kind < 0.82) {
         // outbox.ts sends a random part of the outbox
-        const ids = sim.state.outbox.filter(() => rand() < 0.6).map((e) => e.id);
-        doStep(() => sim.apply({ type: "outbox_sent", ids }), undefined);
+        sendOut(sim.state.outbox.filter(() => rand() < 0.6).map((e) => e.id));
       } else if (kind < 0.92) {
         // The client sends an event again with an old seq (lost ack).
         const last = sim.seq[pi - 1] as number;
@@ -234,12 +279,13 @@ function runSeed(seed: number) {
     const s = sim.state;
     if (s.slots.every((x) => x.state === "empty") && s.outbox.length === 0) break;
     sim.advance(1000);
-    if (s.outbox.length > 0)
-      doStep(() => sim.apply({ type: "outbox_sent", ids: s.outbox.map((e) => e.id) }), undefined);
+    if (s.outbox.length > 0) sendOut(s.outbox.map((e) => e.id));
     for (const pi of pis) {
-      for (const e of sim.outboxFor(pi).filter((x) => x.needsAck)) {
-        app(pi, { event: e.event === "player_left" ? "player_left_ok" : "player_incoming_ok" });
-      }
+      for (const e of sim.outboxFor(pi).filter((x) => x.needsAck)) ackEntry(pi, e);
+      // A late duplicate ok for an old copy.
+      const got = received[pi - 1] ?? [];
+      const old = got.length > 0 && rand() < 0.3 ? pick(got) : undefined;
+      if (old) idOk(pi, old.event, old.id);
     }
     for (let room = 5 as PiId; room >= 1; room--) {
       const st = sim.slot(room).state;

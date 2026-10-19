@@ -5,6 +5,8 @@ import { formatInZone } from "../src/time.ts";
 import { BASE, logs, replies, Sim, sends } from "./harness.ts";
 
 const OSLO = "Europe/Oslo";
+/** The outbox id in a player_incoming / player_left payload. */
+const anyId = expect.any(Number) as unknown as number;
 
 /** Registers a player and moves it to `room` in state `incoming` (all handovers acked). */
 function toRoom(sim: Sim, username: string, room: PiId, roomMs = 1000): string {
@@ -201,7 +203,7 @@ describe("finish (8.5) and hand over (8.6)", () => {
     });
     expect(sim.outboxFor(1).map((e) => [e.event, e.needsAck])).toEqual([["game_finish_ok", false]]);
     expect(sim.outboxFor(2).map((e) => e.payload)).toEqual([
-      { event: "player_incoming", username: "Ola", player_data: { color: "red" } },
+      { event: "player_incoming", id: anyId, username: "Ola", player_data: { color: "red" } },
     ]);
   });
 
@@ -426,6 +428,7 @@ describe("share (8.8)", () => {
     sim.finish(2);
     expect(sim.outboxFor(3)[0]?.payload).toEqual({
       event: "player_incoming",
+      id: anyId,
       username: "A",
       player_data: { secret: { code: [1, 2] }, all: true },
     });
@@ -450,7 +453,9 @@ describe("share (8.8)", () => {
     sim.finish(1);
     const payload = sim.outboxFor(2)[0]?.payload;
     expect(JSON.parse(JSON.stringify(payload))).toEqual(
-      JSON.parse('{"event":"player_incoming","username":"A","player_data":{"__proto__":{"a":1}}}'),
+      JSON.parse(
+        '{"event":"player_incoming","id":2,"username":"A","player_data":{"__proto__":{"a":1}}}',
+      ),
     );
   });
 
@@ -566,7 +571,7 @@ describe("player quits (8.9)", () => {
     sim.leave(1);
     expect(sim.slot(2).state).toBe("empty");
     expect(sim.outboxFor(2).map((e) => e.payload)).toEqual([
-      { event: "player_left", username: "A" },
+      { event: "player_left", id: anyId, username: "A" },
     ]);
     sim.leftOk(2);
     expect(sim.outboxFor(2)).toEqual([]);
@@ -577,7 +582,7 @@ describe("player quits (8.9)", () => {
     toRoom(sim, "A", 2);
     sim.leave(1);
     expect(sim.outboxFor(2).map((e) => e.payload)).toEqual([
-      { event: "player_left", username: "A" },
+      { event: "player_left", id: anyId, username: "A" },
     ]);
   });
 
@@ -594,8 +599,8 @@ describe("player quits (8.9)", () => {
     sim.finish(1);
     sim.incomingOk(2); // late ok for A
     expect(sim.outboxFor(2).map((e) => e.payload)).toEqual([
-      { event: "player_left", username: "A" },
-      { event: "player_incoming", username: "B", player_data: {} },
+      { event: "player_left", id: anyId, username: "A" },
+      { event: "player_incoming", id: anyId, username: "B", player_data: {} },
     ]);
     sim.leftOk(2);
     sim.incomingOk(2);
@@ -775,6 +780,129 @@ describe("delivery: seq, ack and dedupe", () => {
     expect(sim.db.pis.get(1)?.lastSeq).toBe(0);
     const fx = sim.ev(1, { event: "register", username: "B" }, 1);
     expect(replies(fx)).toEqual([{ event: "player_register_ok" }]);
+  });
+});
+
+describe("ok with id (outbox message id)", () => {
+  /** A in room 1 finished: player_incoming(A) for Pi 2 is open. Returns its id. */
+  function incomingA(sim: Sim): number {
+    sim.register("A");
+    sim.start(1);
+    sim.finish(1);
+    sim.deliver(1);
+    const e = sim.outboxFor(2)[0];
+    if (e?.payload.event !== "player_incoming") throw new Error("no player_incoming");
+    expect(e.payload.id).toBe(e.id);
+    return e.id;
+  }
+
+  test("player_incoming and player_left carry the outbox id", () => {
+    const sim = new Sim();
+    const id = incomingA(sim);
+    expect(sim.deliver(2)).toEqual([
+      { event: "player_incoming", id, username: "A", player_data: {} },
+    ]);
+    sim.leave(1);
+    const left = sim.outboxFor(2)[0];
+    expect(left?.payload).toEqual({ event: "player_left", id: left?.id ?? 0, username: "A" });
+  });
+
+  // Regression: the Pi got two copies of player_incoming(A) (resend after reconnect)
+  // and acks each copy. The second ok comes after player_incoming(B) is open. With
+  // the old rule (remove the oldest open player_incoming), it removed B's message.
+  test("a late duplicate ok does not remove a newer player_incoming", () => {
+    const sim = new Sim();
+    const idA = incomingA(sim);
+    sim.deliver(2);
+    sim.deliver(2); // second copy
+    sim.incomingOk(2, idA);
+    expect(sim.outboxFor(2)).toEqual([]);
+    sim.start(2);
+    sim.finish(2);
+    sim.deliver();
+    sim.accept(3);
+    sim.register("B");
+    sim.start(1);
+    sim.finish(1);
+    const b = sim.outboxFor(2);
+    expect(b.map((e) => e.payload)).toEqual([
+      { event: "player_incoming", id: b[0]?.id ?? 0, username: "B", player_data: {} },
+    ]);
+    const fx = sim.incomingOk(2, idA); // late ok for the second copy of A
+    expect(fx.filter((e) => e.type === "outbox_remove")).toEqual([]);
+    expect(sends(fx, 2)).toEqual([{ event: "ack", seq: sim.seq[1] ?? 0 }]);
+    expect(sim.outboxFor(2)).toEqual(b);
+    sim.incomingOk(2, b[0]?.id ?? 0);
+    expect(sim.outboxFor(2)).toEqual([]);
+  });
+
+  test("a late duplicate player_left_ok does not remove a newer player_left", () => {
+    const sim = new Sim();
+    incomingA(sim);
+    sim.deliver(2);
+    sim.leave(1); // player_left(A) to Pi 2
+    const idA = sim.outboxFor(2)[0]?.id as number;
+    sim.deliver(2);
+    sim.deliver(2);
+    sim.leftOk(2, idA);
+    sim.register("B");
+    sim.start(1);
+    sim.finish(1);
+    sim.deliver();
+    sim.leave(1); // player_left(B) to Pi 2
+    const b = sim.outboxFor(2);
+    expect(b.map((e) => e.payload)).toEqual([
+      { event: "player_left", id: b[0]?.id ?? 0, username: "B" },
+    ]);
+    sim.leftOk(2, idA); // late ok for the second copy of A
+    expect(sim.outboxFor(2)).toEqual(b);
+    sim.leftOk(2, b[0]?.id ?? 0);
+    expect(sim.outboxFor(2)).toEqual([]);
+  });
+
+  test("an id of another Pi or of the other event has no effect", () => {
+    const sim = new Sim();
+    const id = incomingA(sim);
+    sim.deliver(2);
+    expect(sim.incomingOk(3, id).filter((e) => e.type === "outbox_remove")).toEqual([]);
+    expect(sim.leftOk(2, id).filter((e) => e.type === "outbox_remove")).toEqual([]);
+    expect(sim.incomingOk(2, 999).filter((e) => e.type === "outbox_remove")).toEqual([]);
+    expect(sim.outboxFor(2).map((e) => e.id)).toEqual([id]);
+    sim.incomingOk(2, id);
+    expect(sim.outboxFor(2)).toEqual([]);
+    expect(sim.slot(2).notified).toBe(true);
+  });
+
+  test("an ok with id ignores the stale count of old clients and sets it to 0", () => {
+    const sim = new Sim();
+    const idA = incomingA(sim);
+    sim.deliver(2);
+    sim.leave(1); // A quits: the sent player_incoming(A) is deleted
+    expect(sim.state.pis[1]?.staleIncomingOks).toBe(1);
+    sim.incomingOk(2, idA); // the late ok: unknown id, no effect
+    expect(sim.state.pis[1]?.staleIncomingOks).toBe(0);
+    sim.register("B");
+    sim.start(1);
+    sim.finish(1);
+    const idB = sim.outboxFor(2).find((e) => e.event === "player_incoming")?.id as number;
+    sim.incomingOk(2, idB);
+    expect(sim.outboxFor(2).map((e) => e.event)).toEqual(["player_left"]);
+  });
+
+  test("an ok with a bad id is a bad_request, and the seq is acked", () => {
+    const sim = new Sim();
+    incomingA(sim);
+    const fx = sim.ev(2, { event: "player_incoming_ok", id: "x" });
+    expect(sends(fx)).toEqual([
+      {
+        event: "error",
+        code: "bad_request",
+        message: "id must be a positive integer",
+        event_name: "player_incoming_ok",
+      },
+      { event: "ack", seq: 1 },
+    ]);
+    expect(sim.outboxFor(2).length).toBe(1);
   });
 });
 

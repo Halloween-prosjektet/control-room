@@ -392,7 +392,7 @@ export function loadState(db: Database): State {
         id: r.id,
         pi: r.pi as PiId,
         event: r.event as OutboxEvent,
-        payload: JSON.parse(r.payload) as ServerMessage,
+        payload: withOutboxId(r.id, JSON.parse(r.payload) as ServerMessage),
         needsAck: r.needs_ack === 1,
         playerId: r.player_id,
         createdAt: msNotNull(r.created_at),
@@ -522,4 +522,15 @@ export function stateSnapshot(db: Database, tzName: string, connected: PiId[]) {
     outbox_size: outbox.reduce((sum, r) => sum + r.n, 0),
     outbox: outbox.map((r) => ({ pi: r.pi, event: r.event, count: r.n })),
   };
+}
+
+/**
+ * player_incoming and player_left carry the outbox id. A row from an older server
+ * version has no `id` in the payload: add it, so that new clients can echo it.
+ */
+function withOutboxId(id: number, m: ServerMessage): ServerMessage {
+  if ((m.event === "player_incoming" || m.event === "player_left") && m.id === undefined) {
+    return { ...m, id };
+  }
+  return m;
 }

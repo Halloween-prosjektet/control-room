@@ -223,11 +223,41 @@ describe("server", () => {
     await p1.waitAck(p1.leave());
     await p1.waitCount("player_leave_ok", 1);
     await p2.waitCount("player_left", 1);
-    expect(p2.events("player_left")[0]).toEqual({ event: "player_left", username: "Quitter" });
+    expect(p2.events("player_left")[0]).toEqual({
+      event: "player_left",
+      id: expect.any(Number),
+      username: "Quitter",
+    });
     await waitUntil(() => p2.allAcked(), "player_left_ok acked");
     await waitUntil(() => env.srv.room.state.outbox.length === 0, "outbox empty");
     expect(slots(env)[1]).toEqual(["empty", null]);
     expect((await getJson<LeaderboardRow[]>(env, "/leaderboard")).body).toEqual([]);
+  });
+
+  test("a late duplicate ok with an old id does not remove a newer player_incoming", async () => {
+    const env = await setup();
+    const [p1, p2] = [pi(env, 1), pi(env, 2)];
+    await p1.waitAck(p1.register("A"));
+    await play(env, 1);
+    await incoming(env, 2, "A");
+    const first = p2.events("player_incoming")[0];
+    const idA = first && "id" in first ? first.id : 0;
+    expect(idA).toBeGreaterThan(0);
+    await play(env, 2);
+    p2.autoOk = false;
+    await p1.waitAck(p1.register("B"));
+    await play(env, 1);
+    await waitUntil(
+      () => p2.events("player_incoming").some((m) => "username" in m && m.username === "B"),
+      "pi 2 player_incoming B",
+    );
+    const entry = env.srv.room.state.outbox.find((e) => e.pi === 2);
+    expect(entry?.payload).toMatchObject({ event: "player_incoming", username: "B" });
+    // A second copy of player_incoming(A) gets its ok late: no effect.
+    await p2.waitAck(p2.sendEvent({ event: "player_incoming_ok", id: idA }));
+    expect(env.srv.room.state.outbox.find((e) => e.pi === 2)).toEqual(entry);
+    await p2.waitAck(p2.sendEvent({ event: "player_incoming_ok", id: entry?.id }));
+    expect(env.srv.room.state.outbox.filter((e) => e.pi === 2)).toEqual([]);
   });
 
   test("Pi disconnects and connects again: the outbox is sent again", async () => {

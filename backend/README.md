@@ -79,6 +79,21 @@ These rules are added to the protocol in the plan. The Godot client uses them.
   last `seq` of the Pi to 0 and stores the new session. If the session is the
   same (a new connection of the same app start), the server keeps the last
   `seq`. If `auth` has no `session`, the server keeps the last `seq`.
+- `player_incoming` and `player_left` have an integer `id`. The `id` is the id
+  of the outbox message. The server can send the same message (with the same
+  `id`) more than one time. The client sends `player_incoming_ok` or
+  `player_left_ok` for each copy that it gets, with the same `id`.
+- When the server gets an ok with `id`, it removes only the outbox message with
+  that `id` (for that Pi and that event). If no such message is open (unknown
+  `id`, or the server removed it before), the ok has no effect. The server
+  still acks the `seq` of the ok. If `id` is not a positive integer, the server
+  replies `error` with code `bad_request`.
+- An ok with no `id` (old client) removes the oldest open message of that
+  event for the Pi. For `player_incoming_ok` with no `id`, the server first
+  ignores one ok for each sent `player_incoming` that it removed because the
+  player quit (`stale_incoming_oks`). An ok with `id` sets this count to 0.
+- At start, the server adds the `id` to an outbox message from an older server
+  version that has no `id`.
 
 ## Connections
 

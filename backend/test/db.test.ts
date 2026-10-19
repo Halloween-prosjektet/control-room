@@ -105,6 +105,29 @@ describe("schema", () => {
   });
 });
 
+describe("outbox rows of an older version", () => {
+  test("a player_incoming payload without id gets the row id on load", () => {
+    const { db } = tempDb();
+    const sim = new DbSim(db);
+    sim.register("A");
+    sim.start(1);
+    sim.finish(1);
+    const entry = sim.state.outbox.find((e) => e.event === "player_incoming");
+    if (!entry) throw new Error("no player_incoming");
+    db.run("UPDATE outbox SET payload = ? WHERE id = ?", [
+      JSON.stringify({ event: "player_incoming", username: "A", player_data: {} }),
+      entry.id,
+    ]);
+    expect(loadState(db).outbox.find((e) => e.id === entry.id)?.payload).toEqual({
+      event: "player_incoming",
+      id: entry.id,
+      username: "A",
+      player_data: {},
+    });
+    expect(loadState(db)).toEqual(sim.state);
+  });
+});
+
 describe("restart gives the same state", () => {
   test("pipeline with shares, wait, quit and outbox", () => {
     const { path, db } = tempDb();

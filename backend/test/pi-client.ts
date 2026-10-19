@@ -7,7 +7,8 @@
 //   queue is empty; else they go in the queue.
 // - "ack" n removes all events with seq <= n from `unacked` and the queue.
 // - After auth_ok it sends `unacked` again first, then the queue.
-// - player_incoming -> player_incoming_ok; player_left -> player_left_ok.
+// - player_incoming -> player_incoming_ok; player_left -> player_left_ok. The ok
+//   echoes the `id` of the message (when it has one), for each copy it gets.
 
 import type { ServerMessage } from "../src/protocol.ts";
 
@@ -35,6 +36,8 @@ export class PiClient {
   current: { username: string; data: unknown } | null = null;
   /** Send no auth on open (to test the pre-auth buffer). */
   manualAuth = false;
+  /** false: do not send player_incoming_ok / player_left_ok (the test sends them). */
+  autoOk = true;
   private authAttempts = 0;
 
   constructor(
@@ -210,16 +213,21 @@ export class PiClient {
         break;
       case "player_incoming":
         this.current = { username: data.username, data: data.player_data };
-        this.sendEvent({ event: "player_incoming_ok" });
+        if (this.autoOk) this.sendEvent(withId({ event: "player_incoming_ok" }, data.id));
         break;
       case "player_left":
         this.current = null;
-        this.sendEvent({ event: "player_left_ok" });
+        if (this.autoOk) this.sendEvent(withId({ event: "player_left_ok" }, data.id));
         break;
       default:
         break;
     }
   }
+}
+
+/** Adds `id` to an ok event when the server message has one. */
+function withId(e: Record<string, unknown>, id: unknown): Record<string, unknown> {
+  return typeof id === "number" ? { ...e, id } : e;
 }
 
 export function ts(): string {
