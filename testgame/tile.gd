@@ -140,11 +140,22 @@ func drop_link() -> void:
 		_say("link dropped (the client reconnects on its own)")
 
 
+## Runs a console command. Returns an error text, or "".
+func command(verb: String, args: PackedStringArray) -> String:
+	match verb:
+		"connect":
+			connect_to(address_provider.call())
+		"disconnect":
+			disconnect_client()
+		"drop":
+			drop_link()
+		_:
+			return game.run_action(verb, args)
+	return ""
+
+
 func _on_toggle() -> void:
-	if client == null:
-		connect_to(address_provider.call())
-	else:
-		disconnect_client()
+	command("disconnect" if client != null else "connect", PackedStringArray())
 
 
 func _message(text: String) -> void:

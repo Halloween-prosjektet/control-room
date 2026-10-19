@@ -34,10 +34,10 @@ func _ready() -> void:
 	_address = LineEdit.new()
 	_address.text = DEFAULT_ADDRESS
 	_address.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_address.text_submitted.connect(func(_t: String) -> void: _connect_all())
+	_address.text_submitted.connect(func(_t: String) -> void: run_console("connect"))
 	top.add_child(_address)
-	top.add_child(_button("Connect all", _connect_all))
-	top.add_child(_button("Disconnect all", _disconnect_all))
+	top.add_child(_button("Connect all", run_console.bind("connect")))
+	top.add_child(_button("Disconnect all", run_console.bind("disconnect")))
 
 	var grid := GridContainer.new()
 	grid.columns = 3
@@ -89,17 +89,7 @@ func _apply_launch_arguments() -> void:
 		if arg.begins_with("--addr="):
 			_address.text = arg.trim_prefix("--addr=")
 		elif arg == "--connect":
-			_connect_all()
-
-
-func _connect_all() -> void:
-	for tile in tiles:
-		tile.connect_to(get_server_address())
-
-
-func _disconnect_all() -> void:
-	for tile in tiles:
-		tile.disconnect_client()
+			run_console("connect")
 
 
 func _on_tile_logged(room: int, text: String) -> void:
@@ -119,52 +109,34 @@ func _on_console_submitted(line: String) -> void:
 
 
 ## Runs one console line. Also used by tests.
+## "<room> <verb> ..." runs on one room. A line with no room runs on all rooms.
 func run_console(line: String) -> void:
 	var words := line.strip_edges().split(" ", false)
+	var targets := tiles
+	if not words.is_empty() and words[0].is_valid_int():
+		var room := int(words[0])
+		if room < 1 or room > 5:
+			_print("error: room must be 1 to 5")
+			return
+		targets = [tiles[room - 1]]
+		words = words.slice(1)
 	if words.is_empty():
+		_print("error: missing command (try help)")
 		return
-	var first: String = words[0]
-	var error := ""
-	if first.is_valid_int():
-		error = _room_command(int(first), words.slice(1))
-	else:
-		match first:
-			"help":
-				_print(HELP)
-			"clear":
-				_console_log.clear()
-			"connect":
-				_connect_all()
-			"disconnect":
-				_disconnect_all()
-			"state":
-				_fetch("/state")
-			"leaderboard":
-				_fetch("/leaderboard")
-			_:
-				error = "unknown command '%s' (try help)" % first
-	if error != "":
-		_print("error: " + error)
-
-
-func _room_command(room: int, words: PackedStringArray) -> String:
-	if room < 1 or room > 5:
-		return "room must be 1 to 5"
-	if words.is_empty():
-		return "missing command (try help)"
-	var tile := tiles[room - 1]
 	var verb := words[0]
 	match verb:
-		"connect":
-			tile.connect_to(get_server_address())
-			return ""
-		"disconnect":
-			tile.disconnect_client()
-			return ""
-		"drop":
-			tile.drop_link()
-			return ""
-	return tile.game.run_action(verb, words.slice(1))
+		"help":
+			_print(HELP)
+		"clear":
+			_console_log.clear()
+		"state", "leaderboard":
+			_fetch("/" + verb)
+		_:
+			for tile in targets:
+				var error := tile.command(verb, words.slice(1))
+				if error != "":
+					_print("error: room %d: %s" % [tile.room, error])
+					break
 
 
 func _fetch(path: String) -> void:

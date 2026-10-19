@@ -58,17 +58,13 @@ func _field(parent: Control, hint: String, text: String, stretch: float) -> Line
 	return edit
 
 
-func _show(error: String) -> void:
-	_error.text = error
-
-
 func _act(verb: String) -> void:
-	_show(run_action(verb))
+	_error.text = run_action(verb)
 
 
 func _register() -> void:
-	_show(run_action("register", PackedStringArray([_name_edit.text.strip_edges()])))
+	_error.text = run_action("register", PackedStringArray([_name_edit.text.strip_edges()]))
 
 
 func _share() -> void:
-	_show(run_action("share", PackedStringArray([_key_edit.text, _value_edit.text, _rooms_edit.text])))
+	_error.text = run_action("share", PackedStringArray([_key_edit.text, _value_edit.text, _rooms_edit.text]))
