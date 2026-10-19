@@ -137,7 +137,8 @@ func event_handler(data: Dictionary) -> void:
 		"error":
 			var code := str(data.get("code", ""))
 			var message := str(data.get("message", ""))
-			var event := str(data.get("event", ""))
+			# "event" er alltid "error"; hendelsen som feilet ligger i "event_name"
+			var event := str(data.get("event_name", ""))
 			print("server error %s: %s" % [code, message])
 			server_error.emit(code, message, event)
 

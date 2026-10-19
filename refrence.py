@@ -137,7 +137,8 @@ class Client:
                 code = data.get("code", "")
                 message = data.get("message", "")
                 print(f"server error {code}: {message}")
-                self.on_server_error(code, message, data.get("event", ""))
+                # "event" er alltid "error"; hendelsen som feilet ligger i "event_name"
+                self.on_server_error(code, message, data.get("event_name", ""))
             case "player_left":
                 self.current_player = {}
                 await self.send_event(

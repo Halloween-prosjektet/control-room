@@ -210,7 +210,7 @@ func _check_end() -> void:
 				check(sig_log[2][2] is Dictionary and sig_log[2][2].get("score") == 3, "player_incoming player_data = {score: 3}")
 				check(sig_log[3][1] == "alice", "player_left username = alice")
 				check(sig_log[4][1] == "E1" and sig_log[4][2] == "boom", "server_error code/message = E1/boom")
-				print("INFO server_error third arg (event) = '%s'" % sig_log[4][3])
+				check(sig_log[4][3] == "share", "server_error event = failing event name from event_name")
 			check(wait_flag_after_wait, "is_waiting_for_next_pi true during wait")
 			check(not wait_flag_after_ok, "is_waiting_for_next_pi false after game_finish_ok")
 			check(snap_incoming.get("username") == "alice" and snap_incoming.get("data") is Dictionary, "current_player set on player_incoming")
