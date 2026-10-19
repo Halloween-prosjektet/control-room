@@ -52,11 +52,13 @@ func _ready() -> void:
 		tiles.append(tile)
 	var help := RichTextLabel.new()
 	help.text = HELP
+	help.add_theme_color_override("default_color", Tile.DIM)
 	help.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	help.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	grid.add_child(help)
 
 	_console_log = RichTextLabel.new()
+	_console_log.bbcode_enabled = true
 	_console_log.scroll_following = true
 	_console_log.custom_minimum_size.y = 220
 	root.add_child(_console_log)
@@ -92,19 +94,25 @@ func _apply_launch_arguments() -> void:
 			run_console("connect")
 
 
-func _on_tile_logged(room: int, text: String) -> void:
-	_print("room %d: %s" % [room, text])
+func _on_tile_logged(room: int, text: String, color: Color) -> void:
+	_print(text, color, room)
 
 
-func _print(text: String) -> void:
-	_console_log.append_text("[%s] %s\n" % [Time.get_time_string_from_system(), text])
+## Adds a line: dim time, the room (each room has its own color), then the text.
+func _print(text: String, color := Color.WHITE, room := 0) -> void:
+	var tag := ""
+	if room > 0:
+		tag = "[color=#%s]room %d[/color]  " % [Color.from_hsv((room - 1) / 5.0, 0.45, 1.0).to_html(false), room]
+	_console_log.append_text("[color=#%s]%s[/color]  %s[color=#%s]%s[/color]\n" % [
+		Tile.DIM.to_html(false), Time.get_time_string_from_system(), tag,
+		color.to_html(false), text.replace("[", "[lb]")])
 
 
 func _on_console_submitted(line: String) -> void:
 	_console_input.clear()
 	if line.strip_edges() == "":
 		return
-	_print("> " + line)
+	_print("> " + line, Tile.DIM)
 	run_console(line)
 
 
@@ -116,17 +124,17 @@ func run_console(line: String) -> void:
 	if not words.is_empty() and words[0].is_valid_int():
 		var room := int(words[0])
 		if room < 1 or room > 5:
-			_print("error: room must be 1 to 5")
+			_print("error: room must be 1 to 5", Tile.BAD)
 			return
 		targets = [tiles[room - 1]]
 		words = words.slice(1)
 	if words.is_empty():
-		_print("error: missing command (try help)")
+		_print("error: missing command (try help)", Tile.BAD)
 		return
 	var verb := words[0]
 	match verb:
 		"help":
-			_print(HELP)
+			_print(HELP, Tile.DIM)
 		"clear":
 			_console_log.clear()
 		"state", "leaderboard":
@@ -135,7 +143,7 @@ func run_console(line: String) -> void:
 			for tile in targets:
 				var error := tile.command(verb, words.slice(1))
 				if error != "":
-					_print("error: room %d: %s" % [tile.room, error])
+					_print("error: " + error, Tile.BAD, tile.room)
 					break
 
 
@@ -143,15 +151,15 @@ func _fetch(path: String) -> void:
 	var url := get_server_address()
 	url = url.replace("wss://", "https://").replace("ws://", "http://")
 	url = url.rstrip("/") + path
-	_print("GET " + url)
+	_print("GET " + url, Tile.DIM)
 	_http.cancel_request()
 	var err := _http.request(url)
 	if err != OK:
-		_print("error: could not start the request (code %d)" % err)
+		_print("error: could not start the request (code %d)" % err, Tile.BAD)
 		return
 	var result: Array = await _http.request_completed
 	if result[0] != HTTPRequest.RESULT_SUCCESS:
-		_print("error: request failed (result %d)" % result[0])
+		_print("error: request failed (result %d)" % result[0], Tile.BAD)
 		return
 	var body: String = result[3].get_string_from_utf8()
 	var parsed: Variant = JSON.parse_string(body)

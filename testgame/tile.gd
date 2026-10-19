@@ -3,7 +3,13 @@ extends PanelContainer
 ## One "computer": a header with the connection state, the game scene, the last
 ## message from the server, and a short log.
 
-signal logged(room: int, text: String)
+signal logged(room: int, text: String, color: Color)
+
+const DIM := Color(0.55, 0.58, 0.62)
+const SERVER := Color(0.45, 0.85, 1.0)
+const GOOD := Color(0.5, 0.9, 0.5)
+const WARN := Color(1.0, 0.8, 0.4)
+const BAD := Color(1.0, 0.45, 0.4)
 
 var room: int
 var game: RoomGame
@@ -55,6 +61,7 @@ func _ready() -> void:
 
 	_queue_label = Label.new()
 	_queue_label.add_theme_font_size_override("font_size", 12)
+	_queue_label.add_theme_color_override("font_color", DIM)
 	box.add_child(_queue_label)
 
 	_game_holder = MarginContainer.new()
@@ -62,12 +69,13 @@ func _ready() -> void:
 	_load_game()
 
 	_last_message = Label.new()
-	_last_message.text = "Last server message: none"
+	_last_message.text = "Last: none"
 	_last_message.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_last_message.add_theme_color_override("font_color", Color(0.6, 0.9, 1.0))
+	_last_message.add_theme_color_override("font_color", SERVER)
 	box.add_child(_last_message)
 
 	_log = RichTextLabel.new()
+	_log.bbcode_enabled = true
 	_log.scroll_following = true
 	_log.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_log.custom_minimum_size.y = 80
@@ -85,21 +93,27 @@ func _load_game() -> void:
 
 
 func _process(_delta: float) -> void:
+	_drop.disabled = client == null
 	if client == null:
-		_status.text = "disconnected"
+		_set_status("disconnected", DIM)
 		_toggle.text = "Connect"
 		_queue_label.text = ""
-		_drop.disabled = true
 		return
 	_toggle.text = "Disconnect"
-	_drop.disabled = false
 	if _gave_up:
-		_status.text = "gave up"
+		_set_status("gave up", BAD)
 	elif client.is_authenticated:
-		_status.text = "authenticated"
+		_set_status("authenticated", GOOD)
 	else:
-		_status.text = String(ControlRoomClient.State.keys()[client._state]).to_lower().replace("_", " ")
-	_queue_label.text = "%s   queued: %d   waiting for ack: %d" % [uri, client.send_queue.size(), client.unacked.size()]
+		_set_status(String(ControlRoomClient.State.keys()[client._state]).to_lower().replace("_", " "), WARN)
+	_queue_label.text = uri
+	if client.send_queue.size() + client.unacked.size() > 0:
+		_queue_label.text += "   queued: %d   waiting for ack: %d" % [client.send_queue.size(), client.unacked.size()]
+
+
+func _set_status(text: String, color: Color) -> void:
+	_status.text = text
+	_status.add_theme_color_override("font_color", color)
 
 
 func connect_to(p_uri: String) -> void:
@@ -109,19 +123,19 @@ func connect_to(p_uri: String) -> void:
 	_gave_up = false
 	client = ControlRoomClient.new(uri, room)
 	add_child(client)
-	client.authenticated.connect(func() -> void: _say("authenticated"))
+	client.authenticated.connect(func() -> void: _say("authenticated", GOOD))
 	client.gave_up.connect(func() -> void:
 		_gave_up = true
-		_say("gave up connecting"))
+		_say("gave up connecting", BAD))
 	client.game_finish_wait.connect(func(max_wait: String) -> void: _message("game_finish_wait: wait until %s" % max_wait))
-	client.game_finish_ok.connect(func() -> void: _message("game_finish_ok: the player can go to the next room"))
+	client.game_finish_ok.connect(func() -> void: _message("game_finish_ok: go to the next room"))
 	client.player_incoming.connect(func(username: String, player_data: Variant) -> void:
 		_message("player_incoming: %s, data %s" % [username, JSON.stringify(player_data)]))
 	client.player_left.connect(func(username: String) -> void: _message("player_left: %s" % username))
 	client.server_error.connect(func(code: String, message: String, event: String) -> void:
-		_message("server_error %s: %s (%s)" % [code, message, event]))
+		_message("server_error %s: %s (%s)" % [code, message, event], BAD))
 	game.attach(client, room)
-	_say("connecting to %s" % uri)
+	_say("connecting to %s" % uri, DIM)
 	client.run()
 
 
@@ -131,13 +145,13 @@ func disconnect_client() -> void:
 	game.detach()
 	client.queue_free()
 	client = null
-	_say("disconnected")
+	_say("disconnected", DIM)
 
 
 func drop_link() -> void:
 	if client != null and client.websocket != null:
 		client.websocket.close()
-		_say("link dropped (the client reconnects on its own)")
+		_say("link dropped (the client reconnects on its own)", WARN)
 
 
 ## Runs a console command. Returns an error text, or "".
@@ -158,12 +172,12 @@ func _on_toggle() -> void:
 	command("disconnect" if client != null else "connect", PackedStringArray())
 
 
-func _message(text: String) -> void:
-	_last_message.text = "Last server message: " + text
-	_say("server → " + text)
+func _message(text: String, color := SERVER) -> void:
+	_last_message.text = "Last: " + text
+	_last_message.add_theme_color_override("font_color", color)
+	_say("server → " + text, color)
 
 
-func _say(text: String) -> void:
-	var line := "[%s] %s" % [Time.get_time_string_from_system(), text]
-	_log.append_text(line + "\n")
-	logged.emit(room, text)
+func _say(text: String, color := Color.WHITE) -> void:
+	_log.append_text("[color=#%s]%s[/color]\n" % [color.to_html(false), text.replace("[", "[lb]")])
+	logged.emit(room, text, color)
