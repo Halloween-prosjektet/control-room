@@ -1,76 +1,92 @@
 # Control Room Client
 
-WebSocket-klient for kontrollrommet. Port av `refrence.py`. Krever Godot 4.x.
+Med denne Godot-tillegget kan spillet ditt snakke med kontrollrommet:
+registrere spilleren, si fra når spillet starter og slutter, og sende
+beskjeder til de andre rommene. Krever Godot 4.
 
-## Installasjon
+## 1. Legg til tillegget
 
-Anbefalt (får oppdateringer via git), kjør i prosjektets rotmappe:
+1. Last ned prosjektet som ZIP fra GitHub og pakk det ut.
+2. Kopier mappen `godot/addons/control_room_client` inn i `addons`-mappen i
+   Godot-prosjektet ditt. Lag `addons` hvis den ikke finnes.
+
+Det er alt. Du trenger ikke slå på noe under *Project Settings → Plugins*.
+
+Bruker du git? Da kan du heller kjøre dette i prosjektmappen, så får du
+oppdateringer enkelt:
 
 ```sh
 git submodule add -b addon https://github.com/halloween-prosjektet/control-room.git addons/control_room_client
 ```
 
-Oppdater senere med `git submodule update --remote addons/control_room_client`.
-Se hoved-README-en for detaljer. Du kan også bare kopiere mappen inn i `addons/`.
-Aktivering under *Project Settings → Plugins* er valgfritt; klassen er
-tilgjengelig uansett.
+## 2. Koble til
 
-## Bruk
+Lag et nytt skript på en `Node` i scenen din, og lim inn dette:
 
 ```gdscript
 extends Node
 
 var client: ControlRoomClient
 
-func _ready() -> void:
-	# uri, og gruppen din sitt rom nummer (pi_id, 1-5)
-	client = ControlRoomClient.new("ws://example.com:443", 1)
-	add_child(client)
-	client.authenticated.connect(_on_authenticated)
-	client.gave_up.connect(_on_gave_up)
-	client.run()
 
-func _on_authenticated() -> void:
-	client.register_player("John Doe")
-	client.start_game()
-	client.share("sword", true, 2)   # kun til pi 2
-	client.share("key_1", true)      # til alle
-	client.finish_game()
+func _ready() -> void:
+	# Adressen får du av kontrollrom-gruppen. Rom nummer er 1 til 5.
+	client = ControlRoomClient.new("ws://ADRESSE:PORT", 1)
+	add_child(client)
+	client.run()
 ```
 
-Hendelser som sendes mens forbindelsen er nede legges i en kø og sendes
-etter at klienten har koblet til og autentisert seg på nytt.
+Bytt ut `ADRESSE:PORT` med serveradressen, og `1` med rommet ditt.
+Klienten kobler til selv, og kobler til på nytt hvis nettet faller ut.
 
-### Levering og ack
+## 3. Si fra til kontrollrommet
 
-Hver hendelse fra `send_event` får et økende løpenummer `seq`. Når en hendelse
-er sendt, ligger den i `unacked` til serveren svarer `{"event": "ack", "seq": n}`.
-Et `ack` bekrefter alle hendelser med `seq <= n`. Etter hver autentisering
-(også etter reconnect) sendes hendelsene i `unacked` på nytt, foran køen.
-Ingen hendelser går tapt, men en hendelse kan komme to ganger. Serveren må
-derfor ignorere et `seq` den har sett før (se `verification/README.md`).
+Bruk disse i spillet ditt når det skjer:
 
-## API
-
-| Medlem | Beskrivelse |
+| Når | Skriv |
 | --- | --- |
-| `ControlRoomClient.new(uri, pi_id)` | Oppretter klienten. `uri` er server-adressen (`ws://` / `wss://`), `pi_id` er rom nummer |
-| `uri`, `pi_id` | Kan også endres etter opprettelse, før `run()` |
-| `current_player` | Dictionary med `username` og `data` for nåværende spiller |
-| `is_authenticated` | `true` når `auth_ok` er mottatt |
-| `run()` | Kobler til; kobler til på nytt automatisk hvis forbindelsen mistes |
-| `register_player(username)` / `leave_player()` | Spiller inn / ut |
-| `start_game()` / `finish_game()` | Spillstatus |
-| `share(key, value, pi = null)` | Deler en verdi. `pi` er `null` (alle), en int eller en Array med ints |
-| `send_event(payload)` | Sender en vilkårlig hendelse (køes hvis frakoblet). Legger til `seq` i `payload` |
-| `send_queue`, `unacked` | Hendelser som ikke er sendt ennå, og hendelser som er sendt men ikke bekreftet med `ack` |
-| `event_handler(data)` | Håndterer innkommende hendelser; overstyr/utvid ved behov |
-| signal `authenticated` | Utløses etter vellykket autentisering (også etter reconnect) |
-| signal `gave_up` | Utløses når 10 forsøk på å koble til på nytt har feilet |
-| signal `game_finish_wait(max_wait)` | Neste rom er opptatt. `max_wait` er ISO 8601-tid med offset. `is_waiting_for_next_pi` blir `true` |
-| signal `game_finish_ok` | Spilleren er sendt videre. `is_waiting_for_next_pi` blir `false` |
-| signal `player_incoming(username, player_data)` | Ny spiller kommer til rommet ditt (ack sendes automatisk) |
-| signal `player_left(username)` | Spilleren forlot spillet (ack sendes automatisk) |
-| signal `server_error(code, message, event)` | Serveren avviste en melding. Feilen skrives også til konsollen |
+| Spilleren skriver inn navn (kun rom 1) | `client.register_player("Navn")` |
+| Spilleren starter spillet ditt | `client.start_game()` |
+| Spilleren er ferdig i rommet ditt | `client.finish_game()` |
+| Spilleren gir opp og går | `client.leave_player()` |
+| Spilleren har funnet noe andre rom trenger | `client.share("nøkkel", true, 3)` |
 
-Eksempel på et helt spill: `example/main.tscn` (endre uri og pi id i `example/main.gd`).
+Ved `share` er siste tall rommet som skal få beskjeden. Utelat det for å
+sende til alle rom, eller bruk en liste, for eksempel `[2, 3]`.
+
+Du kan kalle alt dette med en gang. Er nettet nede, venter klienten og sender
+det senere.
+
+## 4. Ta imot beskjeder
+
+Koble til disse signalene (etter `add_child`, før `client.run()`):
+
+| Signal | Betyr |
+| --- | --- |
+| `player_incoming(username, player_data)` | En spiller er på vei til rommet ditt. `player_data` er det forrige rom delte |
+| `player_left(username)` | Spilleren gikk, og kommer ikke likevel |
+| `game_finish_wait(max_wait)` | Neste rom er opptatt. Be spilleren vente |
+| `game_finish_ok` | Spilleren kan gå videre til neste rom |
+| `server_error(code, message, event)` | Serveren avviste noe. Feilen står også i konsollen |
+| `authenticated` | Klar til bruk |
+| `gave_up` | Klarte ikke å koble til |
+
+Eksempel:
+
+```gdscript
+client.player_incoming.connect(_on_player_incoming)
+
+func _on_player_incoming(username: String, player_data: Variant) -> void:
+	print("Velkommen, ", username)
+```
+
+## Prøv det
+
+Åpne `godot/example/main.tscn` og kjør scenen. Endre adresse og rom nummer
+øverst i `example/main.gd` først.
+
+## Feil?
+
+- Ingenting skjer: sjekk adressen, og at serveren kjører.
+- Skriv `ws://` foran adressen (eller `wss://` hvis serveren bruker det).
+- Les konsollen i Godot. Klienten skriver hva som er galt.
