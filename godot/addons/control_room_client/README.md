@@ -41,6 +41,15 @@ func _on_authenticated() -> void:
 Hendelser som sendes mens forbindelsen er nede legges i en kø og sendes
 etter at klienten har koblet til og autentisert seg på nytt.
 
+### Levering og ack
+
+Hver hendelse fra `send_event` får et økende løpenummer `seq`. Når en hendelse
+er sendt, ligger den i `unacked` til serveren svarer `{"event": "ack", "seq": n}`.
+Et `ack` bekrefter alle hendelser med `seq <= n`. Etter hver autentisering
+(også etter reconnect) sendes hendelsene i `unacked` på nytt, foran køen.
+Ingen hendelser går tapt, men en hendelse kan komme to ganger. Serveren må
+derfor ignorere et `seq` den har sett før (se `verification/README.md`).
+
 ## API
 
 | Medlem | Beskrivelse |
@@ -53,7 +62,8 @@ etter at klienten har koblet til og autentisert seg på nytt.
 | `register_player(username)` / `leave_player()` | Spiller inn / ut |
 | `start_game()` / `finish_game()` | Spillstatus |
 | `share(key, value, pi = null)` | Deler en verdi. `pi` er `null` (alle), en int eller en Array med ints |
-| `send_event(payload)` | Sender en vilkårlig hendelse (køes hvis frakoblet) |
+| `send_event(payload)` | Sender en vilkårlig hendelse (køes hvis frakoblet). Legger til `seq` i `payload` |
+| `send_queue`, `unacked` | Hendelser som ikke er sendt ennå, og hendelser som er sendt men ikke bekreftet med `ack` |
 | `event_handler(data)` | Håndterer innkommende hendelser; overstyr/utvid ved behov |
 | signal `authenticated` | Utløses etter vellykket autentisering (også etter reconnect) |
 | signal `gave_up` | Utløses når 10 forsøk på å koble til på nytt har feilet |

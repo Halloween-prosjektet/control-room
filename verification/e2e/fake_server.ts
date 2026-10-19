@@ -6,7 +6,7 @@
 type Msg = Record<string, any>;
 interface Entry {
   conn: number;
-  dir: "in" | "out" | "sys";
+  dir: "in" | "out" | "sys" | "dup";
   msg: Msg;
   t: number;
 }
@@ -25,6 +25,18 @@ function send(ws: any, msg: Msg) {
   ws.send(JSON.stringify(msg));
 }
 
+// Per Pi (across connections): seq numbers seen, and the highest seq n such that
+// all seq 1..n are seen (the cumulative ack value). A message with a seq that
+// was seen before is a duplicate: it is logged as "dup" and not processed.
+const seenByPi = new Map<number, { seen: Set<number>; contig: number }>();
+const piState = (pi: number) => {
+  let st = seenByPi.get(pi);
+  if (!st) seenByPi.set(pi, (st = { seen: new Set(), contig: 0 }));
+  return st;
+};
+const dups = () => log.filter((e) => e.dir === "dup");
+
+// "ins" holds accepted messages only (duplicates are in "dup" entries).
 const ins = (conn?: number) =>
   log.filter((e) => e.dir === "in" && (conn === undefined || e.conn === conn));
 const events = (conn?: number) => ins(conn).filter((e) => e.msg.event !== "auth");
@@ -50,11 +62,29 @@ function checkTimestamps(f: string[]) {
   }
 }
 
+// Check for all scenarios: every event has a seq; accepted seq values are
+// exactly 1..n in order (no loss, no duplicate after dedupe, order kept).
+function checkSeq(f: string[]) {
+  const seqs: number[] = [];
+  for (const e of events()) {
+    if (!Number.isInteger(e.msg.seq) || e.msg.seq < 1) f.push(`event '${e.msg.event}' has bad seq ${JSON.stringify(e.msg.seq)}`);
+    else seqs.push(e.msg.seq);
+  }
+  for (let i = 0; i < seqs.length; i++)
+    if (seqs[i] !== i + 1) {
+      f.push(`accepted seq not 1..n in order: got ${JSON.stringify(seqs.slice(0, 20))}${seqs.length > 20 ? "..." : ""} (first bad at index ${i})`);
+      break;
+    }
+  for (const e of ins()) if (e.msg.event === "auth" && "seq" in e.msg) f.push("auth message has a seq");
+}
+
 interface Scenario {
   onMessage(ws: any, msg: Msg): void;
+  suppressAck?(ws: any, msg: Msg): boolean;
   verify(f: string[]): void;
 }
 
+let targetSeq: number | undefined;
 const answerAuth = (ws: any) => send(ws, { event: "auth_ok" });
 
 const scenarios: Record<string, Scenario> = {
@@ -169,17 +199,14 @@ const scenarios: Record<string, Scenario> = {
       const vals = seqs.map((e) => e.msg.value as number);
       for (let i = 1; i < vals.length; i++)
         if (vals[i] <= vals[i - 1]) f.push(`order broken: ${vals[i - 1]} then ${vals[i]}`);
-      // Gaps are only tolerated right at the drop (events in flight; no acks exist).
-      const lost: number[] = [];
-      for (let i = 1; i < vals.length; i++)
-        for (let v = vals[i - 1] + 1; v < vals[i]; v++) lost.push(v);
-      const c1 = events(1).filter((e) => e.msg.event === "share" && e.msg.key === "seq").map((e) => e.msg.value as number);
-      for (let i = 1; i < c1.length; i++)
-        if (c1[i] !== c1[i - 1] + 1) f.push(`gap INSIDE conn 1 stream: ${c1[i - 1]} then ${c1[i]}`);
-      if (lost.length)
-        console.log(
-          `SERVER INFO ${lost.length} event(s) lost at drop (sent into dying socket, no acks): seq ${lost.join(",")}`,
-        );
+      // At-least-once: no loss. After dedupe: no duplicate. Order kept.
+      for (let i = 0; i < vals.length; i++)
+        if (vals[i] !== i) {
+          f.push(`share 'seq' values not 0..n in order: ${vals[i - 1]} then ${vals[i]} at index ${i}`);
+          break;
+        }
+      const onConn0 = events().filter((e) => e.conn === 0).length;
+      console.log(`SERVER INFO drop: ${onConn0} events accepted on conn 0, ${dups().length} duplicate(s) dropped after reconnect`);
       const down = sh.filter((e) => e.msg.key === "down");
       const downOn1 = down.filter((e) => e.conn === 1).map((e) => e.msg.value);
       if (!eq(downOn1, [0, 1, 2])) f.push(`'down' events on conn 1: ${JSON.stringify(downOn1)}, want [0,1,2]`);
@@ -189,6 +216,40 @@ const scenarios: Record<string, Scenario> = {
       const last = events().at(-1)?.msg.event;
       if (last !== "game_finish") f.push(`last event '${last}', want game_finish`);
       if (seqs.length === 0 || vals.at(-1) !== 149) f.push(`last seq ${vals.at(-1)}, want 149`);
+      checkTimestamps(f);
+    },
+  },
+
+  // d2) server reads an event, does NOT ack it, then kills the connection.
+  // The client must send it again; the server sees a seq it knows (dedupe).
+  lost_after_send: {
+    suppressAck(ws, msg) {
+      return ws.data.conn === 0 && msg.event === "share" && msg.key === "target";
+    },
+    onMessage(ws, msg) {
+      if (msg.event === "auth") return answerAuth(ws);
+      if (ws.data.conn === 0 && msg.event === "share" && msg.key === "target") {
+        targetSeq = msg.seq;
+        rec(0, "sys", { event: "SERVER_TERMINATE" });
+        ws.terminate();
+      }
+    },
+    verify(f) {
+      if (connCount !== 2) f.push(`connections: got ${connCount}, want 2`);
+      if (targetSeq === undefined) return f.push("server never saw the 'target' event");
+      const acked = log.filter((e) => e.dir === "out" && e.msg.event === "ack" && e.conn === 0 && e.msg.seq >= targetSeq!);
+      if (acked.length) f.push(`server acked seq ${targetSeq} or later on conn 0, but it must not`);
+      const again = dups().filter((e) => e.conn === 1 && e.msg.seq === targetSeq);
+      if (again.length !== 1) f.push(`resend of seq ${targetSeq} on conn 1 (as duplicate): got ${again.length}, want 1`);
+      const tgt = events().filter((e) => e.msg.key === "target");
+      if (tgt.length !== 1) f.push(`'target' accepted ${tgt.length} times, want exactly 1`);
+      const keys = events().filter((e) => e.msg.event === "share").map((e) => e.msg.key);
+      if (!eq(keys, ["a", "target", "b", "c"])) f.push(`share order: ${JSON.stringify(keys)}, want [a,target,b,c]`);
+      const want = ["player_register", "game_start", "share", "share", "share", "share", "game_finish"];
+      if (!eq(names(events()), want)) f.push(`events: ${JSON.stringify(names(events()))}, want ${JSON.stringify(want)}`);
+      const last = log.filter((e) => e.dir === "out" && e.msg.event === "ack").at(-1)?.msg.seq;
+      if (last !== 7) f.push(`last cumulative ack ${last}, want 7`);
+      console.log(`SERVER INFO lost_after_send: target seq ${targetSeq} seen on conn 0 without ack, resent on conn 1, ${dups().length} duplicate(s) dropped`);
       checkTimestamps(f);
     },
   },
@@ -245,7 +306,22 @@ const server = Bun.serve({
       } catch {
         return;
       }
+      if (msg.event === "auth") ws.data.pi = msg.pi;
+      else {
+        const st = piState(ws.data.pi ?? -1);
+        if (Number.isInteger(msg.seq)) {
+          if (st.seen.has(msg.seq)) {   // seq seen before: drop, but ack again
+            rec(ws.data.conn, "dup", msg);
+            send(ws, { event: "ack", seq: st.contig });
+            return;
+          }
+          st.seen.add(msg.seq);
+          while (st.seen.has(st.contig + 1)) st.contig++;
+        }
+      }
       rec(ws.data.conn, "in", msg);
+      if (msg.event !== "auth" && !sc.suppressAck?.(ws, msg))
+        send(ws, { event: "ack", seq: piState(ws.data.pi ?? -1).contig });
       sc.onMessage(ws, msg);
     },
     close(ws: any) {
@@ -260,6 +336,7 @@ process.on("SIGTERM", () => {
   const f: string[] = [];
   try {
     sc.verify(f);
+    checkSeq(f);
   } catch (e) {
     f.push(`verify threw: ${e}`);
   }

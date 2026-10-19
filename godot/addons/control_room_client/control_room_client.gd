@@ -26,8 +26,12 @@ var current_player := {}  # Informasjon om nåværende spiller, brukervavn osv
 var is_waiting_for_next_pi := false
 var is_authenticated := false
 
-var send_queue: Array = []
+var send_queue: Array = []  # Hendelser som ikke er sendt ennå
+var unacked: Array = []  # Sendt, men serveren har ikke svart med "ack" ennå
 
+var _next_seq := 1
+# Tilfeldig id for denne oppstarten. Serveren nullstiller løpenummer når den endres.
+var _session := "%08x%08x" % [randi(), randi()]
 var _state := State.IDLE
 var _timer := 0.0
 var _auth_attempt := 0
@@ -55,9 +59,14 @@ func _get_timestamp() -> String:
 
 
 func send_event(payload: Dictionary) -> void:
+	# Hver hendelse får et løpenummer. Serveren svarer med "ack" og ignorerer
+	# løpenumre den har sett før, så hendelser kan sendes på nytt uten risiko.
+	payload["seq"] = _next_seq
+	_next_seq += 1
 	# Hendelser sendes kun når vi er autentisert og køen er tom. Da beholdes
 	# rekkefølgen, og ingenting sendes før auth_ok.
 	if is_authenticated and send_queue.is_empty() and _send_raw(payload):
+		unacked.append(payload)
 		return
 	send_queue.append(payload)
 
@@ -115,6 +124,8 @@ func event_handler(data: Dictionary) -> void:
 			pass
 		"player_register_ok", "register_player_ok", "player_leave_ok", "game_start_ok":
 			pass
+		"ack":
+			_handle_ack(int(data.get("seq", 0)))
 		"game_finish_wait":
 			is_waiting_for_next_pi = true
 			game_finish_wait.emit(str(data.get("max_wait", "")))
@@ -227,7 +238,7 @@ func _begin_auth_attempt() -> void:
 		return
 	_auth_attempt += 1
 	_timer = AUTH_TIMEOUT
-	_send_raw({"event": "auth", "pi": pi_id})
+	_send_raw({"event": "auth", "pi": pi_id, "session": _session})
 
 
 # Send køen i rekkefølge. Stopp ved første feil, så rekkefølgen beholdes.
@@ -235,7 +246,13 @@ func _flush_queue() -> void:
 	while not send_queue.is_empty():
 		if not _send_raw(send_queue[0]):
 			break
-		send_queue.pop_front()
+		unacked.append(send_queue.pop_front())
+
+
+# "ack" bekrefter alle hendelser med seq <= n
+func _handle_ack(n: int) -> void:
+	unacked = unacked.filter(func(e): return e["seq"] > n)
+	send_queue = send_queue.filter(func(e): return e["seq"] > n)
 
 
 func _on_authenticated() -> void:
@@ -244,6 +261,9 @@ func _on_authenticated() -> void:
 	_retry_amount = 0
 	_retry_delay = INITIAL_RETRY_DELAY
 
+	# Hendelser uten ack kan ha gått tapt med forbindelsen: send dem først på nytt
+	send_queue = unacked + send_queue
+	unacked = []
 	_flush_queue()
 
 	authenticated.emit()

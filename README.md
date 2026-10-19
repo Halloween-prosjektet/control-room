@@ -19,7 +19,7 @@ git submodule add -b addon https://github.com/halloween-prosjektet/control-room.
 | `register_player(username)` / `leave_player()` | Spiller inn / ut |
 | `start_game()` / `finish_game()` | Spillstatus |
 | `share(key, value, pi = null)` | Deler en verdi. `pi` er `null` (alle), en int eller en Array med ints |
-| `send_event(payload)` | Sender en vilkårlig hendelse |
+| `send_event(payload)` | Sender en vilkårlig hendelse. Får et løpenummer `seq`; serveren svarer med `ack`, og uten `ack` sendes hendelsen på nytt etter reconnect |
 | `event_handler(data)` | Håndterer innkommende hendelser; overstyr ved behov |
 | signal `authenticated` | Klar til bruk (også etter reconnect) |
 | signal `gave_up` | Klarte ikke å koble til |

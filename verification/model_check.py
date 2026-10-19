@@ -8,14 +8,22 @@ GDScript function it mirrors. The client runs in a lossy environment.
 Time is abstracted: a timer that expires is the nondeterministic input
 "elapsed". Only the Python standard library is used.
 
+Delivery protocol (at-least-once): every app event gets a seq. After send_text
+returns OK the event goes to "unacked". The server replies "ack" n (cumulative:
+all seq <= n). _handle_ack removes events with seq <= n from unacked and
+send_queue. On every authentication, send_queue = unacked + send_queue and
+unacked = [], then the queue is flushed. The server keeps the set "received" and
+ignores a seq that it has seen before.
+
 Variants of the client:
-  fixed   - the shipped code (baseline): send_event sends only if authenticated
-            and the queue is empty and _send_raw succeeds, else it queues; auth
-            goes through _send_raw and is never queued; the flush in
-            _on_authenticated sends send_queue[0], pops only on success and
-            stops at the first failure.
-  asis    - the legacy code before the repair (reference only: S1, S2, S3 fail).
-  mutants - deliberately broken copies of fixed. Each must be killed.
+  baseline - the shipped code: send_event sends only if authenticated and the
+             queue is empty and _send_raw succeeds (then the event goes to
+             unacked), else it queues; auth goes through _send_raw and is never
+             queued; the flush sends send_queue[0], moves it to unacked on
+             success and stops at the first failure.
+  mutants  - deliberately broken copies of baseline. Each must be killed.
+The legacy "asis" variant (code before the repair) is not kept here. See the
+git history of this file and the README, section History.
 """
 import sys
 from collections import namedtuple, deque
@@ -25,7 +33,10 @@ from itertools import product
 AUTH_ATTEMPTS = 2      # GDScript: 3
 MAX_RETRIES = 2        # GDScript: 10
 N_EVENTS = 2           # max number of app events given to send_event
-FLAKY_MAX = 2         # bound: failed sends allowed in the flaky cooperative graph
+FLAKY_MAX = 2          # bound: failed sends allowed in the flaky cooperative graph
+LOSS_MAX = 1           # bound: network drops allowed in the recover (fair loss) graph
+RECOVER_FLAKY = 1      # bound: failed sends allowed in the recover graph
+INBOX_CAP = 6          # bound: max packets in the inbox when the server adds an ack (baseline never reaches it)
 AUTH_Q_CAP = 1         # bound: max auth messages that a failed send may queue
 
 IDLE, CONNECTING, AUTHENTICATING, CONNECTED, WAITING_RETRY, STOPPED = (
@@ -37,38 +48,47 @@ IDLE, CONNECTING, AUTHENTICATING, CONNECTED, WAITING_RETRY, STOPPED = (
 #  rs      ready state that the client last saw: N none, C connecting, O open, X closed
 #  isauth  is_authenticated
 #  queue   send_queue; item 0 is an auth message, item k>0 is app event k
+#  unacked unacked: app events sent (send_text OK), no ack yet
 #  att     _auth_attempt        retry  _retry_amount
 #  net     real transport: N none, P pending, U up, D dead
 #  out     messages on the wire that the server has not read yet
 #  inbox   packets from server that the client has not read yet
-#  sent    app events for which send_text returned OK (in order)
-#  lost    app events lost with the socket after send_text returned OK
+#  received server: app events accepted (sorted tuple)
+#  seen    server: seq values seen (dedupe table; equals received in baseline)
 #  given   number of app events given to send_event
 #  fails   history: losses since last authentication
 #  calls   history: calls of _begin_auth_attempt on this connection
 #  preauth history: an app event went on the wire while not authenticated
 #  early   history: a queued event went on the wire while not authenticated
 #  fb      history: failed sends so far (counted only in the cooperative environment)
-S = namedtuple("S", "st ws rs isauth queue att retry net out inbox sent lost "
-                    "given fails calls preauth early fb")
-INIT = S(IDLE, False, "N", False, (), 0, 0, "N", (), (), (), (), 0, 0, 0, False, False, 0)
+#  dr      history: connection drops by the network so far (counted only if coop)
+S = namedtuple("S", "st ws rs isauth queue unacked att retry net out inbox received seen "
+                    "given fails calls preauth early fb dr")
+INIT = S(IDLE, False, "N", False, (), (), 0, 0, "N", (), (), (), (), 0, 0, 0, False, False, 0, 0)
+
+
+def contig(seen):
+    """Highest n such that all seq 1..n are in seen (cumulative ack value)."""
+    n = 0
+    while (n + 1) in seen:
+        n += 1
+    return n
 
 
 class Model:
-    def __init__(self, fixed=True, mutant=None, coop=False, flaky=0):
-        self.fixed = fixed
+    def __init__(self, mutant=None, coop=False, flaky=0, loss=0):
         self.m = mutant
         self.coop = coop    # cooperative environment (for liveness)
         self.flaky = flaky  # coop only: at most this many send_text failures
+        self.loss = loss    # coop only: the network may drop the connection this many times
+
+    def seq(self, k):
+        """gd: payload["seq"] = _next_seq; _next_seq += 1 (event k gets seq k)."""
+        return 1 if self.m == "no_seq_inc" else k
 
     # ---- helpers ---------------------------------------------------------
-    def _lose(self, s, ids):
-        app = [i for i in ids if i != 0]
-        return s._replace(lost=tuple(sorted(set(s.lost) | set(app))))
-
     def _close_transport(self, s):
         # websocket.close(): model pessimistically. Unread messages are lost.
-        s = self._lose(s, s.out)
         return s._replace(net="N", out=())
 
     def _try_send(self, s, msg, from_queue):
@@ -83,91 +103,85 @@ class Model:
             res.append((s, False))            # send_text returns an error
         t = s
         if msg != 0:
-            t = t._replace(sent=t.sent + (msg,))
             if not t.isauth:
                 t = t._replace(preauth=True)
                 if from_queue:
                     t = t._replace(early=True)
         if t.net == "U":
             t = t._replace(out=t.out + (msg,))
-        else:                                  # socket already dead, not yet polled
-            t = self._lose(t, (msg,))
+        # else: socket already dead, not yet polled: the message is lost
         res.append((t, True))
         return res
 
     # ---- send_event (gd: send_event) -----------------------------------
     def send_event(self, s, msg):
         can = s.ws and s.rs == "O"
-        if self.fixed:
-            if msg == 0 and self.m != "auth_queued":
-                # gd: _begin_auth_attempt calls _send_raw. Failure is ignored.
-                return [t for t, ok in self._try_send(s, 0, False)] if can else [s]
-            if msg != 0:
-                if self.m != "send_unauth":    # mutant: socket open is enough
-                    can = can and s.isauth
-                can = can and not s.queue
+        if msg == 0 and self.m != "auth_queued":
+            # gd: _begin_auth_attempt calls _send_raw. Failure is ignored.
+            return [t for t, ok in self._try_send(s, 0, False)] if can else [s]
+        if msg != 0:
+            if self.m != "send_unauth":    # mutant: socket open is enough
+                can = can and s.isauth
+            can = can and not s.queue
         if not can:
             return [s._replace(queue=s.queue + (msg,))]
         out = []
         for t, ok in self._try_send(s, msg, False):
-            out.append(t if ok else t._replace(queue=t.queue + (msg,)))
+            if ok:
+                out.append(t if msg == 0 else t._replace(unacked=t.unacked + (msg,)))
+            elif self.m == "unacked_early" and msg != 0:   # mutant: unacked.append before the send
+                out.append(t._replace(queue=t.queue + (msg,), unacked=self._ua(t.unacked, msg)))
+            else:
+                out.append(t._replace(queue=t.queue + (msg,)))
         return out
 
-    # ---- loop in _on_authenticated (gd: _on_authenticated) ----------------
-    def flush(self, s, from_auth_entry=False):
-        q = s.queue
-        n = len(q)
-        if n == 0:
+    @staticmethod
+    def _ua(u, msg):
+        # unacked.append(msg). An auth message (mutant auth_queued) is never acked, so skip it.
+        return u + (msg,) if msg != 0 and msg not in u else u
+
+    # ---- _flush_queue (gd: _flush_queue) ----------------------------------
+    def flush(self, s):
+        if not s.queue:
             return [s]
         results = []
-        if self.fixed:
-            def rec(t):                        # gd: while not send_queue.is_empty()
-                if not t.queue:
-                    results.append(t); return
-                head = t.queue[0]
-                if self.m == "pop_first":      # mutant: pop before send
-                    for u, ok in self._try_send(t._replace(queue=t.queue[1:]), head, True):
-                        if ok: rec(u)
-                        else: results.append(u)        # event lost, loop stops
-                    return
-                for u, ok in self._try_send(t, head, True):
-                    if ok:
-                        rec(u._replace(queue=u.queue[1:]))
-                    elif self.m == "flush_drop":       # mutant: drop, go on
-                        rec(u._replace(queue=u.queue[1:]))
-                    else:
-                        results.append(u)              # stop at first failure
-            def rq(t, left):                   # mutant: old loop, size times
-                if left == 0:
-                    results.append(t); return
-                head, rest = t.queue[0], t.queue[1:]
-                for u, ok in self._try_send(t._replace(queue=rest), head, True):
-                    rq(u if ok else u._replace(queue=u.queue + (head,)), left - 1)
-            if self.m == "flush_requeue":
-                rq(s, n)
-            else:
-                rec(s)
-            return results
-        # as-is: for _i in range(size): send_event(pop_front()); failure re-appends
-        # so result = failed events in order. Outcomes per event are independent.
-        for oks in product([True, False], repeat=n):
-            if self.coop and not all(oks): continue
-            if not (s.ws and s.rs == "O") and any(oks): continue
-            t = s._replace(queue=())
-            ok_states = [t]
-            failed = []
-            for msg, ok in zip(q, oks):
+        def rec(t):                        # gd: while not send_queue.is_empty()
+            if not t.queue:
+                results.append(t); return
+            head = t.queue[0]
+            if self.m == "pop_first":      # mutant: pop before send
+                for u, ok in self._try_send(t._replace(queue=t.queue[1:]), head, True):
+                    if ok: rec(u._replace(unacked=self._ua(u.unacked, head)))
+                    else: results.append(u)        # event lost, loop stops
+                return
+            for u, ok in self._try_send(t, head, True):
                 if ok:
-                    nxt = []
-                    for u in ok_states:
-                        nxt += [x for x, o in self._try_send(u, msg, True) if o]
-                    ok_states = nxt
+                    rec(u._replace(queue=u.queue[1:], unacked=self._ua(u.unacked, head)))
+                elif self.m == "flush_drop":       # mutant: drop, go on
+                    rec(u._replace(queue=u.queue[1:]))
+                elif self.m == "unacked_early":    # mutant: unacked.append before the send
+                    results.append(u._replace(unacked=self._ua(u.unacked, head)))
                 else:
-                    failed.append(msg)
-            keep = tuple(failed)
-            for u in ok_states:
-                results.append(u._replace(queue=keep))
+                    results.append(u)              # stop at first failure
+        def rq(t, left):                   # mutant: old loop, size times
+            if left == 0:
+                results.append(t); return
+            head, rest = t.queue[0], t.queue[1:]
+            for u, ok in self._try_send(t._replace(queue=rest), head, True):
+                if ok: rq(u._replace(unacked=self._ua(u.unacked, head)), left - 1)
+                else: rq(u._replace(queue=u.queue + (head,)), left - 1)
+        if self.m == "flush_requeue":
+            rq(s, len(s.queue))
+        else:
+            rec(s)
         return results
+
+    # ---- _handle_ack (gd: _handle_ack) ------------------------------------
+    def handle_ack(self, s, n):
+        if self.m == "ack_off_by_one":
+            n += 1                         # mutant: removes seq <= n+1
+        keep = lambda q: tuple(e for e in q if self.seq(e) > n)
+        return s._replace(unacked=keep(s.unacked), queue=keep(s.queue))
 
     # ---- _connection_lost -------------------------------------------------
     def connection_lost(self, s):
@@ -179,6 +193,8 @@ class Model:
             inbox=(), fails=min(s.fails + 1, MAX_RETRIES + 3))  # capped: keeps no_stop finite
         if self.m == "clear_queue":
             s = s._replace(queue=())
+        if self.m == "unacked_clear":      # mutant: connection loss clears unacked
+            s = s._replace(unacked=())
         limit_hit = {"retry_off": s.retry > MAX_RETRIES,
                      "early_stop": s.retry >= MAX_RETRIES - 1}.get(
                          self.m, s.retry >= MAX_RETRIES)
@@ -209,6 +225,8 @@ class Model:
         s = s._replace(isauth=True, st=CONNECTED, fails=0)
         if self.m != "no_retry_reset":
             s = s._replace(retry=0)
+        if self.m != "no_requeue":         # gd: send_queue = unacked + send_queue; unacked = []
+            s = s._replace(queue=s.unacked + s.queue, unacked=())
         return self.flush(s)
 
     # ---- _process (one tick) ----------------------------------------------
@@ -236,7 +254,7 @@ class Model:
             return self.begin_auth(s) if elapsed else [s]
         # CONNECTED. gd: _flush_queue() first, then the packet loop. The model
         # splits this into the flush (here) and one packet read (read_packet).
-        if self.m == "no_tick_flush" or not self.fixed:    # mutant / legacy: no flush
+        if self.m == "no_tick_flush":                      # mutant: no flush
             return [s]
         return self.flush(s)
 
@@ -244,9 +262,11 @@ class Model:
         """gd: _process, CONNECTED, packet loop (one packet per step)."""
         t = s._replace(rs="O")
         pkt, t = t.inbox[0], t._replace(inbox=t.inbox[1:])
-        if pkt == "inc" and t.given < N_EVENTS:     # event_handler: ack
+        if pkt == "inc" and t.given < N_EVENTS:     # event_handler: player_incoming_ok
             t = t._replace(given=t.given + 1)
             return self.send_event(t, t.given)
+        if isinstance(pkt, tuple):                  # event_handler: ("ack", n)
+            return [self.handle_ack(t, pkt[1])]
         return [t]
 
     # ---- all transitions --------------------------------------------------
@@ -254,7 +274,9 @@ class Model:
         out = []
         def add(label, states):
             for t in states:
-                if t != s: out.append((label, t))
+                # bound (mutants only): states with duplicate events beyond 2N are cut off
+                if t != s and len(t.queue) + len(t.unacked) <= 2 * N_EVENTS:
+                    out.append((label, t))
         # client / user
         if s.st == IDLE:                                     # run()
             add("run", self.connect(s._replace(retry=0, fails=0)))
@@ -272,21 +294,32 @@ class Model:
             if not self.coop:
                 add("net_fail", [s._replace(net="D")])
         if s.net == "U":
+            if not self.coop or s.dr < self.loss:
+                add("net_drop", [s._replace(net="D", out=(),
+                                            dr=s.dr + 1 if self.coop else s.dr)])
             if not self.coop:
-                add("net_drop", [self._lose(s, s.out)._replace(net="D", out=())])
                 if len(s.inbox) < 2:
                     for p in ("bad", "inc"):
                         add("server_push(%s)" % p, [s._replace(inbox=s.inbox + (p,))])
             if s.out:                                        # server reads one message
                 m, r = s.out[0], s._replace(out=s.out[1:])
                 if m != 0:
-                    add("server_recv(app %d)" % m, [r])
+                    # dedupe by seq: a seq seen before is ignored; ack is cumulative
+                    q = self.seq(m)
+                    if q not in r.seen:
+                        r = r._replace(received=tuple(sorted(r.received + (m,))),
+                                       seen=tuple(sorted(r.seen + (q,))))
+                    if len(r.inbox) < INBOX_CAP:         # cap: reached only by mutants that resend on one connection
+                        add("server_recv(app %d) + ack" % m,
+                            [r._replace(inbox=r.inbox + (("ack", contig(r.seen)),))])
+                    if not self.coop:                    # ack lost or late
+                        add("server_recv(app %d), no ack" % m, [r])
                 else:
                     add("server_accept_auth", [r._replace(inbox=r.inbox + ("ok",))])
                     if not self.coop:
                         add("server_reject_auth", [r._replace(inbox=r.inbox + ("bad",))])
                         add("server_ignore_auth", [r])
-                        add("server_close", [self._lose(r, r.out)._replace(net="D", out=())])
+                        add("server_close", [r._replace(net="D", out=())])
         return out
 
 
@@ -329,19 +362,26 @@ CORE = {
  "retry count = losses since last auth; STOPPED only after MAX_RETRIES+1 losses":
      lambda s: (s.retry == s.fails if s.st != STOPPED
                 else s.retry == MAX_RETRIES and s.fails == MAX_RETRIES + 1),
- "no event lost: given = queued + sent, no duplicates, lost only if sent":
-     lambda s: (sorted(ids(s.queue) + list(s.sent)) == list(range(1, s.given + 1))
-                and set(s.lost) <= set(s.sent)),
+ "no event lost or duplicated by the client: queue and unacked disjoint, no duplicates, only given events; server receives only given events":
+     lambda s: (not set(ids(s.queue)) & set(s.unacked)
+                and len(set(ids(s.queue)) | set(s.unacked)) == len(ids(s.queue)) + len(s.unacked)
+                and set(ids(s.queue)) | set(s.unacked) <= set(range(1, s.given + 1))
+                and set(s.received) <= set(range(1, s.given + 1))),
  "queued events are never written to the wire before auth": lambda s: not s.early,
 }
-# Properties that the code is expected NOT to satisfy (findings).
+def inc(l): return list(l) == sorted(set(l))
+
+# S1 - S3 and S4' (all hold for the shipped code).
 STRICT = {
  "S1 no app message on wire while unauthenticated": lambda s: not s.preauth,
- "S2 FIFO: sent and queue in given order, queue after sent":
-     lambda s: (list(s.sent) == sorted(s.sent) and ids(s.queue) == sorted(ids(s.queue))
-                and (not s.sent or not ids(s.queue) or max(s.sent) < min(ids(s.queue)))),
- "S3 send_queue never holds an auth message": lambda s: 0 not in s.queue,
- "S4 no event lost with the socket after send_text OK": lambda s: not s.lost,
+ "S2 FIFO: unacked+queue in given order, wire in order, server accepts in order without gap":
+     lambda s: (inc(list(s.unacked) + ids(s.queue)) and inc(ids(s.out))
+                and set(s.received) == set(range(1, len(s.received) + 1))),
+ "S3 send_queue and unacked never hold an auth message":
+     lambda s: 0 not in s.queue and 0 not in s.unacked,
+ "S4' at-least-once (safety): every given event is in queue, unacked or received by the server":
+     lambda s: all(k in s.queue or k in s.unacked or k in s.received
+                   for k in range(1, s.given + 1)),
 }
 
 
@@ -395,7 +435,7 @@ def backward_reach(edges, targets):
     return seen
 
 
-def liveness(parent, edges, coop_parent, coop_edges, flaky_edges=None):
+def liveness(parent, edges, coop_parent, coop_edges, flaky_edges=None, recover_edges=None):
     r = {}
     r["no deadlock (a state without moves is STOPPED)"] = \
         next((s for s, w in edges.items() if not w and s.st != STOPPED), None) is None
@@ -436,6 +476,23 @@ def liveness(parent, edges, coop_parent, coop_edges, flaky_edges=None):
         for v, c in comp3.items(): sz[c] = sz.get(c, 0) + 1
         r["flaky: non-empty queue in CONNECTED always drains (no stuck state, no cycle)"] = (
             stuck <= drained and all(n == 1 for n in sz.values()))
+    if recover_edges is not None:
+        # fair loss: cooperative, but the network drops the connection LOSS_MAX times.
+        # S4' liveness, per event k: given ~> received, and given ~> acked (left the client).
+        for what, leaves in (
+                ("received by the server", lambda s, k: k in s.received),
+                ("acked (gone from queue and unacked)", lambda s, k: k not in s.queue and k not in s.unacked)):
+            ok = True
+            for k in range(1, N_EVENTS + 1):
+                pend = {v for v in recover_edges if v.given >= k and not leaves(v, k)}
+                reach = backward_reach(recover_edges, [v for v in recover_edges
+                                                       if v.given >= k and leaves(v, k)])
+                sub = {v: [w for w in recover_edges[v] if w in pend and w != v] for v in pend}
+                comp4 = sccs(sub)
+                sz = {}
+                for v, c in comp4.items(): sz[c] = sz.get(c, 0) + 1
+                ok &= pend <= reach and all(n == 1 for n in sz.values())
+            r["recover (fair loss): every given event is eventually %s" % what] = ok
     return r
 
 
@@ -444,54 +501,40 @@ def run_variant(name, **kw):
     parent, edges = explore(full)
     cm = Model(coop=True, **kw)
     cparent, cedges = explore(cm)
+    _, redges = explore(Model(coop=True, flaky=RECOVER_FLAKY, loss=LOSS_MAX, **kw))
     inv = check_invariants(parent, CORE)
     strict = check_invariants(parent, STRICT)
-    fstates = 0
-    fedges = None
-    if kw.get("fixed", True):
-        _, fedges = explore(Model(coop=True, flaky=FLAKY_MAX, **kw))
-        fstates = len(fedges)
-    live = liveness(parent, edges, cparent, cedges, fedges)
-    return dict(parent=parent, edges=edges, cstates=len(cedges), fstates=fstates, inv=inv,
-                strict=strict, live=live)
+    _, fedges = explore(Model(coop=True, flaky=FLAKY_MAX, **kw))
+    live = liveness(parent, edges, cparent, cedges, fedges, redges)
+    return dict(parent=parent, edges=edges, cstates=len(cedges), fstates=len(fedges),
+                rstates=len(redges), inv=inv, strict=strict, live=live)
 
 
 def main():
     fail = False
-    print("Bounds: AUTH_ATTEMPTS=%d MAX_RETRIES=%d N_EVENTS=%d" %
-          (AUTH_ATTEMPTS, MAX_RETRIES, N_EVENTS))
-    outcome = {}
-    for vname, kw in (("fixed", {}), ("asis", {"fixed": False})):
-        r = run_variant(vname, **kw)
-        outcome[vname] = r
-        ntr = sum(len(v) for v in r["edges"].values())
-        print("\n=== variant: %s  (%d reachable states, %d transitions; "
-              "%d coop states, %d flaky-coop states) ===" %
-              (vname, len(r["edges"]), ntr, r["cstates"], r["fstates"]))
-        print("-- core safety --")
-        for n, (ok, bad) in r["inv"].items():
-            print("  [%s] %s" % ("PASS" if ok else "FAIL", n))
-            if not ok:
-                fail = True; print("       trace:", trace(r["parent"], bad))
-        print("-- liveness (graph analysis) --")
-        for n, ok in r["live"].items():
-            print("  [%s] %s" % ("PASS" if ok else "FAIL", n))
-            fail |= not ok
-        print("-- strict properties --")
-        for n, (ok, bad) in r["strict"].items():
-            if vname == "asis":
-                tag = "legacy FINDING (violated)" if not ok else "not violated"
-            elif n.startswith("S4"):
-                tag = "accepted limit (violated, expected)" if not ok else "FAIL (S4 should be violated)"
-                fail |= ok
-            else:
-                tag = "PASS" if ok else "FAIL"
-                fail |= not ok
-            print("  [%s] %s" % (tag, n))
-            if not ok:
-                print("       shortest trace:", trace(r["parent"], bad))
+    print("Bounds: AUTH_ATTEMPTS=%d MAX_RETRIES=%d N_EVENTS=%d FLAKY_MAX=%d LOSS_MAX=%d" %
+          (AUTH_ATTEMPTS, MAX_RETRIES, N_EVENTS, FLAKY_MAX, LOSS_MAX))
+    r = run_variant("baseline")
+    ntr = sum(len(v) for v in r["edges"].values())
+    print("\n=== baseline (the shipped code): %d reachable states, %d transitions; "
+          "%d coop states, %d flaky-coop states, %d recover states ===" %
+          (len(r["edges"]), ntr, r["cstates"], r["fstates"], r["rstates"]))
+    print("-- core safety --")
+    for n, (ok, bad) in r["inv"].items():
+        print("  [%s] %s" % ("PASS" if ok else "FAIL", n))
+        if not ok:
+            fail = True; print("       trace:", trace(r["parent"], bad))
+    print("-- liveness (graph analysis) --")
+    for n, ok in r["live"].items():
+        print("  [%s] %s" % ("PASS" if ok else "FAIL", n))
+        fail |= not ok
+    print("-- S1, S2, S3, S4' --")
+    for n, (ok, bad) in r["strict"].items():
+        print("  [%s] %s" % ("PASS" if ok else "FAIL", n))
+        if not ok:
+            fail = True; print("       shortest trace:", trace(r["parent"], bad))
     # mutants
-    print("\n=== mutation tests (each mutant of 'fixed' must be killed) ===")
+    print("\n=== mutation tests (each mutant of the baseline must be killed) ===")
     mutants = {
         "no_reset_att": "do not reset _auth_attempt on a new connection",
         "keep_isauth": "do not clear is_authenticated on connection loss",
@@ -509,15 +552,20 @@ def main():
         "auth_queued": "auth is sent through the queue (S3)",
         "no_tick_flush": "no _flush_queue() in _process while CONNECTED (queue can stall)",
         "pop_first": "flush pops the event before it sends (event lost on failure)",
+        "ack_off_by_one": "ack n removes seq <= n+1 (one event too many)",
+        "no_requeue": "unacked is not moved to send_queue on authentication",
+        "unacked_clear": "connection loss clears unacked",
+        "unacked_early": "event is appended to unacked before the send (also queued if send fails)",
+        "no_seq_inc": "seq is not incremented (all events have seq 1)",
     }
     for m, desc in mutants.items():
         r = run_variant(m, mutant=m)
         killers = [n for n, (ok, _) in r["inv"].items() if not ok] + \
-                  [n for n, (ok, _) in r["strict"].items()
-                   if not ok and not n.startswith("S4")] + \
+                  [n for n, (ok, _) in r["strict"].items() if not ok] + \
                   [n for n, ok in r["live"].items() if not ok]
         if killers:
-            print("  [KILLED]   %-15s %s\n             by: %s" % (m, desc, killers[0]))
+            short = [k.split(":")[0].split(" (")[0][:60] for k in killers]
+            print("  [KILLED]   %-15s %s\n             by %d: %s" % (m, desc, len(killers), "; ".join(short)))
         else:
             fail = True
             print("  [SURVIVED] %-15s %s" % (m, desc))

@@ -88,6 +88,10 @@ func _initialize() -> void:
 			deadline = 40.0
 			client.run()
 			client._retry_delay = 1
+		"lost_after_send":
+			deadline = 40.0
+			client.run()
+			client._retry_delay = 1
 		"events":
 			deadline = 20.0
 			client.run()
@@ -123,6 +127,16 @@ func _on_authenticated() -> void:
 			done_at = t + 0.7
 		"drop":
 			client._retry_delay = 1  # reset to 5 by auth; shorten again
+		"lost_after_send":
+			client._retry_delay = 1  # auth resets it to 5
+			if auth_count == 1:
+				client.register_player("lost")
+				client.start_game()
+				client.share("a", 1)
+				client.share("target", 2)  # server reads it, does not ack, kills the connection
+				client.share("b", 3)
+				client.share("c", 4)
+				client.finish_game()
 		"events":
 			done_at = t + 1.5
 
@@ -143,6 +157,8 @@ func _process(delta: float) -> bool:
 				check(client.send_queue.size() == 5, "5 events queued while unauthenticated (got %d)" % client.send_queue.size())
 		"drop":
 			_tick_drop()
+		"lost_after_send":
+			_tick_lost()
 		"giveup":
 			_tick_giveup()
 	if done_at > 0.0 and t >= done_at:
@@ -171,6 +187,12 @@ func _tick_drop() -> void:
 		done_at = t + 0.8
 
 
+func _tick_lost() -> void:
+	# done when the client has reconnected and the server acked everything
+	if auth_count >= 2 and client.send_queue.is_empty() and client.unacked.is_empty() and done_at < 0.0:
+		done_at = t + 0.8
+
+
 func _tick_giveup() -> void:
 	if client._state == 4:  # WAITING_RETRY: skip the long waits
 		client._timer = 0.0
@@ -182,22 +204,35 @@ func _tick_giveup() -> void:
 		done_at = t + 0.8
 
 
+func _no_pending() -> void:
+	check(client.send_queue.is_empty() and client.unacked.is_empty(),
+		"send_queue and unacked empty at the end (all events acked)")
+
+
 func _check_end() -> void:
 	match scenario:
 		"normal":
 			check(auth_count == 1, "authenticated emitted once")
+			_no_pending()
 			check(client.is_authenticated, "is_authenticated true")
 		"early":
 			check(auth_count == 1, "authenticated emitted once")
+			_no_pending()
 		"auth2":
 			check(auth_count == 1, "authenticated emitted once")
+			_no_pending()
 		"auth3":
 			check(auth_count == 1, "authenticated emitted once")
+			_no_pending()
 		"drop":
 			check(auth_count == 2, "authenticated emitted twice (got %d)" % auth_count)
 			check(saw_down, "client noticed the drop (state WAITING_RETRY seen)")
 			check(max_queue > 0, "events were queued while down (max queue %d)" % max_queue)
 			check(seq_i == 150, "all 150 seq events produced")
+			_no_pending()
+		"lost_after_send":
+			check(auth_count == 2, "authenticated emitted twice (got %d)" % auth_count)
+			_no_pending()
 		"events":
 			var exp_names := ["game_finish_wait", "game_finish_ok", "player_incoming", "player_left", "server_error"]
 			var got_names := []
