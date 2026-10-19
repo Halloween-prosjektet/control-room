@@ -11,7 +11,6 @@ Alle grupper bruker git. Åpne en terminal i mappen til Godot-prosjektet ditt
 
 ```sh
 git submodule add -b addon https://github.com/halloween-prosjektet/control-room.git addons/control_room_client
-git commit -m "Legg til control room client"
 ```
 
 Oppdater senere med:
@@ -25,22 +24,18 @@ Du trenger ikke slå på noe under *Project Settings → Plugins*.
 Får du ikke til git? Last ned prosjektet som ZIP, og kopier mappen
 `godot/addons/control_room_client` inn i `addons`-mappen i prosjektet ditt.
 
-### Har dere ikke et repo ennå?
+### Last opp endringene
 
-Lag et tomt repo i organisasjonen *halloween-prosjektet* på GitHub (knappen
-*New repository*, uten README). Kjør så dette i prosjektmappen:
+Kjør dette i prosjektmappen for å få tillegget inn i repoet deres på GitHub:
 
 ```sh
-git init
 git add .
-git commit -m "Første commit"
-git branch -M main
-git remote add origin https://github.com/halloween-prosjektet/REPO-NAVN.git
-git push -u origin main
+git commit -m "Legg til control room client"
+git push
 ```
 
-Bytt ut `REPO-NAVN` med navnet på repoet deres. Gjør dette **før** du
-legger til tillegget.
+Når andre på gruppen henter prosjektet, må de kjøre
+`git submodule update --init` én gang for å få med tillegget.
 
 ## 2. Koble til
 
