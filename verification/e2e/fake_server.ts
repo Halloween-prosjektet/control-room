@@ -99,6 +99,11 @@ const scenarios: Record<string, Scenario> = {
       if (!eq(all, want)) f.push(`order: got ${JSON.stringify(all)}, want ${JSON.stringify(want)}`);
       const a = ins()[0]?.msg;
       if (a?.pi !== 3) f.push(`auth pi: got ${JSON.stringify(a?.pi)}, want 3`);
+      if (!eq(a?.features, ["game_finish_ack"]))
+        f.push(`auth features: got ${JSON.stringify(a?.features)}, want ["game_finish_ack"]`);
+      // F2: the events after player_register carry the username of the current player.
+      for (const e of events().filter((x) => x.msg.event !== "player_register"))
+        if (e.msg.username !== "bob") f.push(`${e.msg.event} username: got ${JSON.stringify(e.msg.username)}, want "bob"`);
       const reg = events().find((e) => e.msg.event === "player_register")?.msg;
       if (reg?.username !== "bob") f.push(`username: got ${JSON.stringify(reg?.username)}`);
       const sh = events().find((e) => e.msg.event === "share")?.msg;
@@ -251,6 +256,43 @@ const scenarios: Record<string, Scenario> = {
       if (last !== 7) f.push(`last cumulative ack ${last}, want 7`);
       console.log(`SERVER INFO lost_after_send: target seq ${targetSeq} seen on conn 0 without ack, resent on conn 1, ${dups().length} duplicate(s) dropped`);
       checkTimestamps(f);
+    },
+  },
+
+  // h) copies of a message and messages about another player (F6), game_finish_ack (F8)
+  dedupe: {
+    onMessage(ws, msg) {
+      if (msg.event !== "auth") return;
+      answerAuth(ws);
+      const steps: Msg[] = [
+        { event: "player_incoming", id: 51, username: "alice", player_data: { k: 1 } },
+        { event: "player_incoming", id: 51, username: "alice", player_data: { k: 1 } },
+        { event: "player_left", id: 52, username: "zed" },
+        { event: "game_finish_ok", id: 53, username: "alice" },
+        { event: "game_finish_ok", id: 53, username: "alice" },
+        { event: "game_finish_ok", id: 54, username: "zed" },
+        { event: "player_left", id: 55, username: "alice" },
+        { event: "player_left", id: 55, username: "alice" },
+        // After player_left the client has no player: a new player can come.
+        { event: "player_incoming", id: 56, username: "bob", player_data: {} },
+      ];
+      steps.forEach((m, i) => setTimeout(() => send(ws, m), 200 + i * 100));
+    },
+    verify(f) {
+      const got = events().map((e) => `${e.msg.event}:${e.msg.id ?? "-"}${e.msg.username ? `:${e.msg.username}` : ""}`);
+      const want = [
+        "player_incoming_ok:51",
+        "game_start:-:alice", // the client starts the player after the first player_incoming
+        "player_incoming_ok:51",
+        "player_left_ok:52",
+        "game_finish_ack:53",
+        "game_finish_ack:53",
+        "game_finish_ack:54",
+        "player_left_ok:55",
+        "player_left_ok:55",
+        "player_incoming_ok:56",
+      ];
+      if (!eq(got, want)) f.push(`client replies: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
     },
   },
 

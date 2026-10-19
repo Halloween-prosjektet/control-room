@@ -96,7 +96,7 @@ func _initialize() -> void:
 			deadline = 40.0
 			client.run()
 			client._retry_delay = 1
-		"events":
+		"events", "dedupe":
 			deadline = 20.0
 			client.run()
 		"giveup":
@@ -141,7 +141,7 @@ func _on_authenticated() -> void:
 				client.share("b", 3)
 				client.share("c", 4)
 				client.finish_game()
-		"events":
+		"events", "dedupe":
 			done_at = t + 1.5
 
 
@@ -165,6 +165,10 @@ func _process(delta: float) -> bool:
 			_tick_lost()
 		"giveup":
 			_tick_giveup()
+		"dedupe":
+			if sig_log.size() > 0 and not finish_sent:
+				finish_sent = true  # used here as "started"
+				client.start_game()
 	if done_at > 0.0 and t >= done_at:
 		_check_end()
 		return _finish()
@@ -274,6 +278,14 @@ func _check_end() -> void:
 			check(snap_incoming.get("username") == "alice" and snap_incoming.get("data") is Dictionary, "current_player set on player_incoming")
 			check(snap_left is Dictionary and snap_left.is_empty(), "current_player cleared on player_left")
 			check(client._state == 3, "client still CONNECTED after junk/unknown packets")
+		"dedupe":
+			var got := []
+			for s in sig_log:
+				got.append(s.slice(0, 2))
+			var want := [["player_incoming", "alice"], ["game_finish_ok"], ["player_left", "alice"], ["player_incoming", "bob"]]
+			check(got == want, "one signal per message, none for another player (got %s)" % [got])
+			check(client.current_player.get("username") == "bob", "current player is bob at the end")
+			_no_pending()
 		"giveup":
 			check(gave_up_count == 1, "gave_up emitted exactly once (got %d)" % gave_up_count)
 			check(auth_count == 0, "authenticated never emitted")
