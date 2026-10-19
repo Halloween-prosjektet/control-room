@@ -16,6 +16,7 @@ const AUTH_TIMEOUT := 5.0
 const CONNECT_TIMEOUT := 10.0
 const MAX_RETRIES := 10
 const INITIAL_RETRY_DELAY := 5
+const SEEN_MAX := 200  # Antall meldings-id-er klienten husker (for å kjenne igjen kopier)
 
 var uri := "ws://0.0.0.0:443"  # Eksempel uri
 var pi_id := 1  # Gruppen din sitt rom nummer. 1-5
@@ -30,6 +31,9 @@ var send_queue: Array = []  # Hendelser som ikke er sendt ennå
 var unacked: Array = []  # Sendt, men serveren har ikke svart med "ack" ennå
 
 var _next_seq := 1
+# Meldinger fra serveren som klienten allerede har handlet på ("hendelse:id:brukernavn").
+# Serveren sender en melding på nytt til den får svar, så samme melding kan komme flere ganger.
+var _seen: Array = []
 # Tilfeldig id for denne oppstarten. Serveren nullstiller løpenummer når den endres.
 var _session := "%08x%08x" % [randi(), randi()]
 var _state := State.IDLE
@@ -87,35 +91,51 @@ func register_player(username: String) -> void:
 
 
 func leave_player() -> void:
-	send_event({
+	send_event(_with_username({
 		"event": "player_leave",
-	})
+	}))
 	current_player = {}
 
 
 func start_game() -> void:
-	send_event({
+	send_event(_with_username({
 		"event": "game_start",
 		"timestamp": _get_timestamp(),
-	})
+	}))
 
 
 func finish_game() -> void:
-	send_event({
+	send_event(_with_username({
 		"event": "game_finish",
 		"timestamp": _get_timestamp(),
-	})
+	}))
 
 
 # pi: null (alle), en int, eller en Array med ints
 func share(key: String, value: Variant, pi: Variant = null) -> void:
-	send_event({
+	send_event(_with_username({
 		"event": "share",
 		"key": key,
 		"value": value,
 		"pi": pi,
 		"timestamp": _get_timestamp(),
-	})
+	}))
+
+
+# Legger til brukernavnet til nåværende spiller (hvis kjent), slik at serveren
+# kan sjekke at hendelsen gjelder riktig spiller.
+func _with_username(payload: Dictionary) -> Dictionary:
+	var username := _current_username()
+	if username != "":
+		payload["username"] = username
+	return payload
+
+
+func _current_username() -> String:
+	var username: Variant = current_player.get("username", null)
+	if username is String:
+		return username.strip_edges()
+	return ""
 
 
 func event_handler(data: Dictionary) -> void:
@@ -130,20 +150,35 @@ func event_handler(data: Dictionary) -> void:
 			is_waiting_for_next_pi = true
 			game_finish_wait.emit(str(data.get("max_wait", "")))
 		"game_finish_ok":
+			# Svar med id, så serveren slutter å sende meldingen på nytt
+			if _has_id(data):
+				send_event(_ok_with_id("game_finish_ack", data))
+			# Ignorer en kopi, og en melding om en annen spiller enn den som vises
+			if not _first_copy(data):
+				return
+			var finished_user: Variant = data.get("username", null)
+			if finished_user is String and _current_username() != "" \
+					and finished_user.strip_edges() != _current_username():
+				return
 			is_waiting_for_next_pi = false
 			game_finish_ok.emit()
 		"player_left":
+			send_event(_ok_with_id("player_left_ok", data))
+			# Ignorer en kopi, og player_left for en annen spiller enn den som vises
+			if not _first_copy(data):
+				return
+			var left_user := str(data.get("username", "")).strip_edges()
+			if left_user == "" or left_user != _current_username():
+				return
 			current_player = {}
-			send_event({
-				"event": "player_left_ok",
-			})
 			player_left.emit(str(data.get("username", "")))
 		"player_incoming":
+			send_event(_ok_with_id("player_incoming_ok", data))
+			# Ignorer en kopi av en melding som allerede er tatt imot
+			if not _first_copy(data):
+				return
 			current_player["username"] = data.get("username", null)
 			current_player["data"] = data.get("player_data", null)
-			send_event({
-				"event": "player_incoming_ok",
-			})
 			player_incoming.emit(str(data.get("username", "")), data.get("player_data", null))
 		"error":
 			var code := str(data.get("code", ""))
@@ -152,6 +187,34 @@ func event_handler(data: Dictionary) -> void:
 			var event := str(data.get("event_name", ""))
 			print("server error %s: %s" % [code, message])
 			server_error.emit(code, message, event)
+
+
+# Svaret på player_incoming / player_left / game_finish_ok. Hvis meldingen har "id",
+# sendes den samme "id" tilbake, slik at serveren bare fjerner akkurat den meldingen.
+func _ok_with_id(event: String, data: Dictionary) -> Dictionary:
+	var payload := {"event": event}
+	var id: Variant = data.get("id", null)
+	if id is int or id is float:
+		payload["id"] = int(id)
+	return payload
+
+
+func _has_id(data: Dictionary) -> bool:
+	var id: Variant = data.get("id", null)
+	return id is int or id is float
+
+
+# Sann første gang en melding med denne id-en kommer. En melding uten id er alltid ny.
+func _first_copy(data: Dictionary) -> bool:
+	if not _has_id(data):
+		return true
+	var key := "%s:%d:%s" % [str(data.get("event", "")), int(data.get("id")), str(data.get("username", ""))]
+	if _seen.has(key):
+		return false
+	_seen.append(key)
+	if _seen.size() > SEEN_MAX:
+		_seen.pop_front()
+	return true
 
 
 # Starter tilkoblingen. Kobler til på nytt automatisk hvis forbindelsen mistes.
@@ -238,7 +301,8 @@ func _begin_auth_attempt() -> void:
 		return
 	_auth_attempt += 1
 	_timer = AUTH_TIMEOUT
-	_send_raw({"event": "auth", "pi": pi_id, "session": _session})
+	# "features": klienten svarer game_finish_ack på game_finish_ok
+	_send_raw({"event": "auth", "pi": pi_id, "session": _session, "features": ["game_finish_ack"]})
 
 
 # Send køen i rekkefølge. Stopp ved første feil, så rekkefølgen beholdes.
