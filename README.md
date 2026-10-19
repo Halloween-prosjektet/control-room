@@ -1,27 +1,23 @@
 # Control Room Client
 
-Godot 4.x-addon for kontrollrommet.
+Godot 4-tillegg som kobler spillet ditt til kontrollrommet.
 
-## Installasjon
+**Kom i gang:** se [godot/addons/control_room_client/README.md](godot/addons/control_room_client/README.md).
+Der står installasjon, kode du kan kopiere, og hva du skal kalle når.
 
-Kjør i prosjektets rotmappe (git-repo):
+Kort fortalt:
 
-```sh
-git submodule add -b addon https://github.com/halloween-prosjektet/control-room.git addons/control_room_client
+```gdscript
+client = ControlRoomClient.new("ws://ADRESSE:PORT", 1)  # 1 = rom nummer (1-5)
+add_child(client)
+client.run()
+
+client.register_player("Navn")  # kun rom 1
+client.start_game()
+client.finish_game()
 ```
 
-## Metoder
+Et fullt eksempel ligger i `godot/example/`.
 
-| Medlem | Beskrivelse |
-| --- | --- |
-| `ControlRoomClient.new(uri, pi_id)` | Oppretter klienten. `uri` er server-adressen, `pi_id` er rom nummer (1-5) |
-| `run()` | Kobler til (kobler til på nytt automatisk) |
-| `register_player(username)` / `leave_player()` | Spiller inn / ut |
-| `start_game()` / `finish_game()` | Spillstatus |
-| `share(key, value, pi = null)` | Deler en verdi. `pi` er `null` (alle), en int eller en Array med ints |
-| `send_event(payload)` | Sender en vilkårlig hendelse |
-| `event_handler(data)` | Håndterer innkommende hendelser; overstyr ved behov |
-| signal `authenticated` | Klar til bruk (også etter reconnect) |
-| signal `gave_up` | Klarte ikke å koble til |
-
-Se `godot/example/` for et fullt eksempel.
+For utviklere av serveren og beviset for at klienten virker: se
+`verification/README.md`.
