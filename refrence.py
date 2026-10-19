@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import websockets as ws
 
@@ -20,8 +20,8 @@ class Client:
         self.send_queue = deque()
 
     def _get_timestamp(self):
-        tz = timezone(timedelta(hours=2), name="UTC+2")
-        time_now = datetime.now(tz)
+        # Alltid UTC med +00:00 (mikrosekunder beholdes)
+        time_now = datetime.now(timezone.utc)
         time_now_iso = time_now.isoformat()
         return time_now_iso
 
@@ -59,7 +59,7 @@ class Client:
         self.current_player["username"] = username
         await self.send_event(
             {
-                "event": "register",
+                "event": "player_register",
                 "username": username,
                 "timestamp": self._get_timestamp(),
             }
@@ -100,17 +100,44 @@ class Client:
             }
         )
 
+    # Hooks: overstyr i en subklasse (tilsvarer signalene i Godot-klienten)
+    def on_game_finish_wait(self, max_wait):
+        pass
+
+    def on_game_finish_ok(self):
+        pass
+
+    def on_player_incoming(self, username, player_data):
+        pass
+
+    def on_player_left(self, username):
+        pass
+
+    def on_server_error(self, code, message, event):
+        pass
+
     async def event_handler(self, data):
         match data.get("event", None):
             case None:
                 pass
             case (
-                "register_player_ok"
+                "player_register_ok"
+                | "register_player_ok"
                 | "player_leave_ok"
                 | "game_start_ok"
-                | "game_finish_ok"
             ):
                 pass
+            case "game_finish_wait":
+                self.is_waiting_for_next_pi = True
+                self.on_game_finish_wait(data.get("max_wait", ""))
+            case "game_finish_ok":
+                self.is_waiting_for_next_pi = False
+                self.on_game_finish_ok()
+            case "error":
+                code = data.get("code", "")
+                message = data.get("message", "")
+                print(f"server error {code}: {message}")
+                self.on_server_error(code, message, data.get("event", ""))
             case "player_left":
                 self.current_player = {}
                 await self.send_event(
@@ -118,6 +145,7 @@ class Client:
                         "event": "player_left_ok",
                     }
                 )
+                self.on_player_left(data.get("username", ""))
             case "player_incoming":
                 self.current_player["username"] = data.get("username")
                 self.current_player["data"] = data.get("player_data", None)
@@ -125,6 +153,9 @@ class Client:
                     {
                         "event": "player_incoming_ok",
                     }
+                )
+                self.on_player_incoming(
+                    data.get("username", ""), data.get("player_data", None)
                 )
 
     async def run(self) -> None:

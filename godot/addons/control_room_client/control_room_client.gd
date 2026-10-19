@@ -3,6 +3,11 @@ extends Node
 
 signal authenticated
 signal gave_up
+signal game_finish_wait(max_wait: String)
+signal game_finish_ok
+signal player_incoming(username: String, player_data: Variant)
+signal player_left(username: String)
+signal server_error(code: String, message: String, event: String)
 
 enum State { IDLE, CONNECTING, AUTHENTICATING, CONNECTED, WAITING_RETRY, STOPPED }
 
@@ -36,31 +41,37 @@ func _init(p_uri: String = "ws://0.0.0.0:443", p_pi_id: int = 1) -> void:
 
 
 func _get_timestamp() -> String:
-	# Samme format som Python sin isoformat() i UTC+2
+	# Samme format som Python sin isoformat(), alltid i UTC med +00:00
 	var now := Time.get_unix_time_from_system()
 	var seconds := int(floor(now))
 	var micros := int(round((now - seconds) * 1000000.0))
 	if micros >= 1000000:
 		seconds += 1
 		micros -= 1000000
-	var t := Time.get_datetime_dict_from_unix_time(seconds + 2 * 3600)
-	return "%04d-%02d-%02dT%02d:%02d:%02d.%06d+02:00" % [
+	var t := Time.get_datetime_dict_from_unix_time(seconds)
+	return "%04d-%02d-%02dT%02d:%02d:%02d.%06d+00:00" % [
 		t.year, t.month, t.day, t.hour, t.minute, t.second, micros
 	]
 
 
 func send_event(payload: Dictionary) -> void:
-	if websocket and websocket.get_ready_state() == WebSocketPeer.STATE_OPEN:
-		if websocket.send_text(JSON.stringify(payload)) != OK:
-			send_queue.append(payload)
-	else:
-		send_queue.append(payload)
+	# Hendelser sendes kun når vi er autentisert og køen er tom. Da beholdes
+	# rekkefølgen, og ingenting sendes før auth_ok.
+	if is_authenticated and send_queue.is_empty() and _send_raw(payload):
+		return
+	send_queue.append(payload)
+
+
+func _send_raw(payload: Dictionary) -> bool:
+	if websocket == null or websocket.get_ready_state() != WebSocketPeer.STATE_OPEN:
+		return false
+	return websocket.send_text(JSON.stringify(payload)) == OK
 
 
 func register_player(username: String) -> void:
 	current_player["username"] = username
 	send_event({
-		"event": "register",
+		"event": "player_register",
 		"username": username,
 		"timestamp": _get_timestamp(),
 	})
@@ -102,19 +113,33 @@ func event_handler(data: Dictionary) -> void:
 	match data.get("event", null):
 		null:
 			pass
-		"register_player_ok", "player_leave_ok", "game_start_ok", "game_finish_ok":
+		"player_register_ok", "register_player_ok", "player_leave_ok", "game_start_ok":
 			pass
+		"game_finish_wait":
+			is_waiting_for_next_pi = true
+			game_finish_wait.emit(str(data.get("max_wait", "")))
+		"game_finish_ok":
+			is_waiting_for_next_pi = false
+			game_finish_ok.emit()
 		"player_left":
 			current_player = {}
 			send_event({
 				"event": "player_left_ok",
 			})
+			player_left.emit(str(data.get("username", "")))
 		"player_incoming":
 			current_player["username"] = data.get("username", null)
 			current_player["data"] = data.get("player_data", null)
 			send_event({
 				"event": "player_incoming_ok",
 			})
+			player_incoming.emit(str(data.get("username", "")), data.get("player_data", null))
+		"error":
+			var code := str(data.get("code", ""))
+			var message := str(data.get("message", ""))
+			var event := str(data.get("event", ""))
+			print("server error %s: %s" % [code, message])
+			server_error.emit(code, message, event)
 
 
 # Starter tilkoblingen. Kobler til på nytt automatisk hvis forbindelsen mistes.
@@ -175,6 +200,7 @@ func _process(delta: float) -> void:
 			if _timer <= 0.0:
 				_begin_auth_attempt()
 		State.CONNECTED:
+			_flush_queue()
 			while websocket.get_available_packet_count() > 0:
 				var data = _parse(websocket.get_packet())
 				if data is Dictionary:
@@ -200,7 +226,15 @@ func _begin_auth_attempt() -> void:
 		return
 	_auth_attempt += 1
 	_timer = AUTH_TIMEOUT
-	send_event({"event": "auth", "pi": pi_id})
+	_send_raw({"event": "auth", "pi": pi_id})
+
+
+# Send køen i rekkefølge. Stopp ved første feil, så rekkefølgen beholdes.
+func _flush_queue() -> void:
+	while not send_queue.is_empty():
+		if not _send_raw(send_queue[0]):
+			break
+		send_queue.pop_front()
 
 
 func _on_authenticated() -> void:
@@ -209,8 +243,7 @@ func _on_authenticated() -> void:
 	_retry_amount = 0
 	_retry_delay = INITIAL_RETRY_DELAY
 
-	for _i in range(send_queue.size()):
-		send_event(send_queue.pop_front())
+	_flush_queue()
 
 	authenticated.emit()
 

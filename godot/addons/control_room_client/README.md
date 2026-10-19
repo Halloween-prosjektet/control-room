@@ -57,5 +57,10 @@ etter at klienten har koblet til og autentisert seg på nytt.
 | `event_handler(data)` | Håndterer innkommende hendelser; overstyr/utvid ved behov |
 | signal `authenticated` | Utløses etter vellykket autentisering (også etter reconnect) |
 | signal `gave_up` | Utløses når 10 forsøk på å koble til på nytt har feilet |
+| signal `game_finish_wait(max_wait)` | Neste rom er opptatt. `max_wait` er ISO 8601-tid med offset. `is_waiting_for_next_pi` blir `true` |
+| signal `game_finish_ok` | Spilleren er sendt videre. `is_waiting_for_next_pi` blir `false` |
+| signal `player_incoming(username, player_data)` | Ny spiller kommer til rommet ditt (ack sendes automatisk) |
+| signal `player_left(username)` | Spilleren forlot spillet (ack sendes automatisk) |
+| signal `server_error(code, message, event)` | Serveren avviste en melding. Feilen skrives også til konsollen |
 
 Eksempel på et helt spill: `example/main.tscn` (endre uri og pi id i `example/main.gd`).

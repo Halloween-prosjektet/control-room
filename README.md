@@ -23,5 +23,10 @@ git submodule add -b addon https://github.com/halloween-prosjektet/control-room.
 | `event_handler(data)` | Håndterer innkommende hendelser; overstyr ved behov |
 | signal `authenticated` | Klar til bruk (også etter reconnect) |
 | signal `gave_up` | Klarte ikke å koble til |
+| signal `game_finish_wait(max_wait)` | Neste rom er opptatt; vent til `game_finish_ok` |
+| signal `game_finish_ok` | Spilleren er sendt videre til neste rom |
+| signal `player_incoming(username, player_data)` | Ny spiller kommer til rommet ditt |
+| signal `player_left(username)` | Spilleren forlot spillet |
+| signal `server_error(code, message, event)` | Serveren avviste en melding |
 
 Se `godot/example/` for et fullt eksempel.

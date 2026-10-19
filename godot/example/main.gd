@@ -7,6 +7,11 @@ func _ready() -> void:
 	client = ControlRoomClient.new("ws://0.0.0.0:443", 1)  # Eksempel uri og pi id
 	add_child(client)
 	client.gave_up.connect(get_tree().quit.bind(1))
+	client.game_finish_wait.connect(func(max_wait: String) -> void: print("vent til ", max_wait))
+	client.game_finish_ok.connect(func() -> void: print("ferdig, videre til neste rom"))
+	client.player_incoming.connect(func(username: String, player_data: Variant) -> void: print("ny spiller ", username, " ", player_data))
+	client.player_left.connect(func(username: String) -> void: print("spiller dro ", username))
+	client.server_error.connect(func(code: String, message: String, event: String) -> void: print("feil ", code, ": ", message, " (", event, ")"))
 	client.run()
 	simulate_game()
 
