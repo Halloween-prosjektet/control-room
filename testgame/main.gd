@@ -19,8 +19,6 @@ var _address: LineEdit
 var _console_log: RichTextLabel
 var _console_input: LineEdit
 var _http: HTTPRequest
-var _history: Array[String] = []
-var _history_index := 0
 
 
 func _ready() -> void:
@@ -116,25 +114,8 @@ func _on_console_submitted(line: String) -> void:
 	_console_input.clear()
 	if line.strip_edges() == "":
 		return
-	_history.append(line)
-	_history_index = _history.size()
 	_print("> " + line)
 	run_console(line)
-
-
-func _input(event: InputEvent) -> void:
-	if not _console_input.has_focus() or not event is InputEventKey or not event.pressed:
-		return
-	if event.keycode == KEY_UP and _history_index > 0:
-		_history_index -= 1
-		_console_input.text = _history[_history_index]
-		_console_input.caret_column = _console_input.text.length()
-		get_viewport().set_input_as_handled()
-	elif event.keycode == KEY_DOWN and _history_index < _history.size():
-		_history_index += 1
-		_console_input.text = _history[_history_index] if _history_index < _history.size() else ""
-		_console_input.caret_column = _console_input.text.length()
-		get_viewport().set_input_as_handled()
 
 
 ## Runs one console line. Also used by tests.
