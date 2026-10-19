@@ -19,11 +19,6 @@ Oppdater senere med:
 git submodule update --remote addons/control_room_client
 ```
 
-Du trenger ikke slå på noe under *Project Settings → Plugins*.
-
-Får du ikke til git? Last ned prosjektet som ZIP, og kopier mappen
-`godot/addons/control_room_client` inn i `addons`-mappen i prosjektet ditt.
-
 ### Last opp endringene
 
 Kjør dette i prosjektmappen for å få tillegget inn i repoet deres på GitHub:
