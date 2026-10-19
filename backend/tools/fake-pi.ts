@@ -5,12 +5,17 @@
 //   bun tools/fake-pi.ts --url ws://localhost:7321 --pi 3 --auto
 //
 // It uses the same client protocol as the Godot client (src/protocol.ts):
-// - `auth` with `pi` and a random `session`.
+// - `auth` with `pi`, a random `session` and `features: ["game_finish_ack"]`.
 // - Each other event gets a `seq` (1, 2, 3, ...). The server replies `ack` with
 //   the highest processed seq. Events with no ack are sent again after the next
 //   `auth_ok`, before the events in the queue.
-// - `player_incoming` and `player_left` get `player_incoming_ok` and
-//   `player_left_ok`. The ok echoes the `id` of the message (when it has one).
+// - `player_incoming`, `player_left` and `game_finish_ok` get `player_incoming_ok`,
+//   `player_left_ok` and `game_finish_ack`. The reply echoes the `id` of the message
+//   (when it has one), for each copy.
+// - A copy of a message (same event, id and username) changes nothing more.
+//   `player_left` for another player than the current player changes nothing.
+// - `game_start`, `game_finish`, `player_leave` and `share` carry `username` of the
+//   current player (when known).
 // - When the connection closes, it connects again (1 s, 2 s, 4 s ... max 10 s).
 //   Close code 4001 (auth refused) stops the program.
 //
@@ -188,6 +193,8 @@ class FakePi {
   private waiters: Waiter[] = [];
   private retryMs = 1000;
   private stopped = false;
+  /** Keys "event:id:username" of the server messages that it acted on. */
+  private readonly seen = new Set<string>();
   player: { username: string; player_data: Json } | null = null;
 
   constructor(
@@ -208,7 +215,12 @@ class FakePi {
     this.ws = ws;
     ws.onopen = () => {
       this.retryMs = 1000;
-      this.sendRaw({ event: "auth", pi: this.pi, session: this.session });
+      this.sendRaw({
+        event: "auth",
+        pi: this.pi,
+        session: this.session,
+        features: ["game_finish_ack"],
+      });
     };
     ws.onmessage = (ev) => this.onMessage(String(ev.data));
     ws.onclose = (ev) => {
@@ -310,19 +322,32 @@ class FakePi {
         if (typeof msg.seq === "number") this.onAck(msg.seq);
         break;
       case "player_incoming":
+        this.sendEvent(okWithId("player_incoming_ok", msg.id));
+        if (!this.firstCopy(msg)) return;
         this.player = {
           username: String(msg.username ?? ""),
           player_data: msg.player_data ?? {},
         };
-        this.sendEvent(okWithId("player_incoming_ok", msg.id));
         break;
       case "player_left":
-        this.player = null;
         this.sendEvent(okWithId("player_left_ok", msg.id));
+        if (!this.firstCopy(msg) || msg.username !== this.player?.username) return;
+        this.player = null;
         break;
       case "game_finish_ok":
+        if (typeof msg.id === "number") this.sendEvent(okWithId("game_finish_ack", msg.id));
+        if (!this.firstCopy(msg)) return;
+        if (
+          typeof msg.username === "string" &&
+          this.player !== null &&
+          msg.username !== this.player.username
+        ) {
+          return; // for an earlier player
+        }
+        if (this.pi === 5) this.player = null;
+        break;
       case "player_leave_ok":
-        if (event === "player_leave_ok" || this.pi === 5) this.player = null;
+        this.player = null;
         break;
       case "error":
         this.log(
@@ -333,6 +358,20 @@ class FakePi {
     const now = this.waiters.filter((w) => w.events.includes(event));
     this.waiters = this.waiters.filter((w) => !w.events.includes(event));
     for (const w of now) w.resolve(msg);
+  }
+
+  /** True for the first copy of a server message (a message without id is always new). */
+  private firstCopy(msg: Msg): boolean {
+    if (typeof msg.id !== "number") return true;
+    const key = `${String(msg.event)}:${msg.id}:${String(msg.username)}`;
+    if (this.seen.has(key)) return false;
+    this.seen.add(key);
+    return true;
+  }
+
+  /** The username field of an event: the current player, when known. */
+  private who(): Msg {
+    return this.player ? { username: this.player.username } : {};
   }
 
   /** Waits for the next server message with one of these event names. */
@@ -371,19 +410,20 @@ class FakePi {
   }
 
   register(username: string): void {
+    this.player = { username: username.trim(), player_data: {} };
     this.sendEvent({ event: "player_register", username, timestamp: timestamp() });
   }
   start(): void {
-    this.sendEvent({ event: "game_start", timestamp: timestamp() });
+    this.sendEvent({ event: "game_start", timestamp: timestamp(), ...this.who() });
   }
   finish(): void {
-    this.sendEvent({ event: "game_finish", timestamp: timestamp() });
+    this.sendEvent({ event: "game_finish", timestamp: timestamp(), ...this.who() });
   }
   leave(): void {
-    this.sendEvent({ event: "player_leave" });
+    this.sendEvent({ event: "player_leave", ...this.who() });
   }
   share(key: string, value: Json, pi: number | number[] | null): void {
-    this.sendEvent({ event: "share", key, value, pi, timestamp: timestamp() });
+    this.sendEvent({ event: "share", key, value, pi, timestamp: timestamp(), ...this.who() });
   }
 }
 

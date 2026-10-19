@@ -15,7 +15,8 @@
 //    the ack only after the event is durable.
 // 3. Then give the new outbox entries to outbox.ts. When outbox.ts writes outbox
 //    entries to a socket, it calls step() with {type: "outbox_sent", ids}.
-//    That removes entries with needsAck = false, and marks the others as sent.
+//    That removes entries with needsAck = false (and game_finish_ok entries for a Pi
+//    whose client does not ack them), and marks the others as sent.
 // 4. `auth` is not an input of this module: the connection layer handles it
 //    (section 8.1), and sends the outbox of the Pi again after auth_ok.
 
@@ -28,6 +29,7 @@ import {
   msg,
   type ParseResult,
   type PiId,
+  type PlayerLeaveEvent,
   type PlayerRegisterEvent,
   parseClientMessage,
   parseClientObject,
@@ -90,7 +92,12 @@ export interface OutboxEntry {
   pi: PiId;
   event: OutboxEvent;
   payload: ServerMessage;
-  /** true: stays until the Pi acks (player_incoming, player_left). false: removed after one send. */
+  /**
+   * true: stays until the Pi acks it (player_incoming_ok, player_left_ok, game_finish_ack).
+   * Exception: a game_finish_ok to a Pi whose client does not declare the feature
+   * "game_finish_ack" is removed after one send. false (only rows of an older server
+   * version): removed after one send.
+   */
   needsAck: boolean;
   /** The run that the message is about. */
   playerId: string;
@@ -153,8 +160,11 @@ export type Input =
   | { type: "message"; pi: PiId; text: string }
   /** An already decoded JSON value from an authenticated Pi. */
   | { type: "event"; pi: PiId; data: unknown }
-  /** outbox.ts wrote these outbox entries to a socket. */
-  | { type: "outbox_sent"; ids: number[] }
+  /**
+   * outbox.ts wrote these outbox entries to a socket. `finishAckPis`: the Pis whose
+   * current client acks game_finish_ok (auth feature "game_finish_ack"). Default: none.
+   */
+  | { type: "outbox_sent"; ids: number[]; finishAckPis?: PiId[] }
   /** Operator action: forget the seq of a Pi (use after the Godot app restarts with seq 1). */
   | { type: "reset_seq"; pi: PiId };
 
@@ -176,6 +186,8 @@ export type Effect =
   | { type: "outbox_add"; entry: OutboxEntry }
   | { type: "outbox_remove"; id: number }
   | { type: "outbox_mark_sent"; id: number }
+  /** The payload of an open entry changed (player_data rebuilt after a late share). */
+  | { type: "outbox_update"; id: number; payload: ServerMessage }
   | { type: "run_upsert"; run: RunRow }
   | { type: "room_time_upsert"; playerId: string; room: PiId; time: RoomTime }
   | { type: "share_upsert"; playerId: string; share: Share }
@@ -228,7 +240,7 @@ export function step(
       ctx.onMessage(input.pi, parseClientObject(input.data));
       break;
     case "outbox_sent":
-      ctx.onOutboxSent(input.ids);
+      ctx.onOutboxSent(input.ids, input.finishAckPis ?? []);
       break;
     case "reset_seq":
       ctx.pi(input.pi).lastSeq = 0;
@@ -292,7 +304,7 @@ class Ctx {
     return t.ms;
   }
 
-  /** `payload` gets the id of the new entry (player_incoming and player_left carry it). */
+  /** `payload` gets the id of the new entry (all outbox messages carry it). */
   outboxAdd(
     pi: PiId,
     event: OutboxEvent,
@@ -305,7 +317,7 @@ class Ctx {
       pi,
       event,
       payload: payload(id),
-      needsAck: event !== "game_finish_ok",
+      needsAck: true,
       playerId,
       createdAt: this.now,
       sent: false,
@@ -349,19 +361,57 @@ class Ctx {
   }
 
   /**
-   * The run that "belongs" to Pi N for share and player_leave (8.8.3, 8.9.2):
-   * the run in room N, else the last run that left room N if it is `incoming` in room N+1.
+   * The runs that can "belong" to Pi N for share and player_leave (8.8.3, 8.9.2), in
+   * this order: the run in room N, and the last run that left room N if it is
+   * `incoming` in room N+1.
    */
-  runForPi(pi: PiId): { playerId: string; room: PiId } | null {
+  candidatesForPi(pi: PiId): { playerId: string; room: PiId }[] {
+    const out: { playerId: string; room: PiId }[] = [];
     const slot = this.slot(pi);
-    if (slot.playerId !== null) return { playerId: slot.playerId, room: pi };
+    if (slot.playerId !== null) out.push({ playerId: slot.playerId, room: pi });
     const last = slot.lastLeft;
-    if (last === null || pi === 5 || !this.s.runs[last]) return null;
-    const next = this.slot(pi + 1);
-    if (next.playerId === last && next.state === "incoming") {
-      return { playerId: last, room: next.room };
+    if (last !== null && pi !== 5 && this.s.runs[last] && last !== slot.playerId) {
+      const next = this.slot(pi + 1);
+      if (next.playerId === last && next.state === "incoming") {
+        out.push({ playerId: last, room: next.room });
+      }
     }
-    return null;
+    return out;
+  }
+
+  /**
+   * F2: the run for an event of Pi N. Without `username` (old client): the first
+   * candidate (plan rule). With `username`: the candidate with that username, or
+   * "wrong_player" if there are candidates but none has that username.
+   */
+  runForPi(
+    pi: PiId,
+    username: string | undefined,
+  ): { playerId: string; room: PiId } | "wrong_player" | null {
+    const all = this.candidatesForPi(pi);
+    if (username === undefined) return all[0] ?? null;
+    const hit = all.find((c) => this.run(c.playerId).username === username);
+    if (hit) return hit;
+    return all.length > 0 ? "wrong_player" : null;
+  }
+
+  /** F2: true (and an error reply) when the event names another player than the run. */
+  wrongPlayer(
+    pi: PiId,
+    playerId: string,
+    username: string | undefined,
+    eventName: string,
+  ): boolean {
+    if (username === undefined) return false;
+    const actual = this.run(playerId).username;
+    if (actual === username) return false;
+    this.error(
+      pi,
+      "wrong_player",
+      `room ${pi} has player '${actual}', not '${username}'`,
+      eventName,
+    );
+    return true;
   }
 
   averageRoomMs(room: PiId): number {
@@ -412,7 +462,7 @@ class Ctx {
     from.playerId = null;
     from.lastLeft = playerId;
     from.notified = false;
-    this.outboxAdd(room, "game_finish_ok", () => msg.gameFinishOk(), playerId);
+    this.outboxAdd(room, "game_finish_ok", (id) => msg.gameFinishOk(id, run.username), playerId);
     const data = this.playerData(run, to.room);
     this.outboxAdd(
       to.room,
@@ -488,7 +538,7 @@ class Ctx {
         this.onFinish(pi, e);
         break;
       case "player_leave":
-        this.onLeave(pi);
+        this.onLeave(pi, e);
         break;
       case "share":
         this.onShare(pi, e);
@@ -498,6 +548,9 @@ class Ctx {
         break;
       case "player_left_ok":
         this.onLeftOk(pi, e.id);
+        break;
+      case "game_finish_ack":
+        this.onFinishAck(pi, e.id);
         break;
     }
   }
@@ -546,12 +599,16 @@ class Ctx {
       this.error(pi, "no_player", `room ${pi} has no player`, "game_start");
       return;
     }
+    if (this.wrongPlayer(pi, slot.playerId, e.username, "game_start")) return;
     if (slot.state === "incoming") {
       const run = this.run(slot.playerId);
       this.roomTime(run, pi).startedAt = this.time(pi, "game_start", e.timestamp);
       slot.state = "playing";
       slot.notified = true;
       this.upsertRoomTime(run, pi);
+      // F3: the Pi has the player, so an open player_incoming of this run is stale. A
+      // sent copy can still get a late ok without id (old client): count it as stale.
+      this.dropIncoming(pi, run.playerId, true);
     }
     // playing (repeated message) or waiting (already finished): keep the first start time.
     this.send(pi, msg.gameStartOk());
@@ -564,6 +621,7 @@ class Ctx {
       this.error(pi, "not_playing", `room ${pi} has no player that plays`, "game_finish");
       return;
     }
+    if (this.wrongPlayer(pi, slot.playerId, e.username, "game_finish")) return;
     const run = this.run(slot.playerId);
     const rt = this.roomTime(run, pi);
     if (rt.finishedAt === null) {
@@ -596,7 +654,7 @@ class Ctx {
       slot.lastLeft = run.playerId;
       slot.notified = false;
       this.log("info", `run ${run.playerId} completed in ${total} ms`);
-      this.outboxAdd(5, "game_finish_ok", () => msg.gameFinishOk(), run.playerId);
+      this.outboxAdd(5, "game_finish_ok", (id) => msg.gameFinishOk(id, run.username), run.playerId);
       this.roomEmptied(5);
       return;
     }
@@ -612,8 +670,12 @@ class Ctx {
   }
 
   /** 8.9 */
-  onLeave(pi: PiId): void {
-    const found = this.runForPi(pi);
+  onLeave(pi: PiId, e: PlayerLeaveEvent): void {
+    const found = this.runForPi(pi, e.username);
+    if (found === "wrong_player") {
+      this.error(pi, "wrong_player", `pi ${pi} has no run of '${e.username}'`, "player_leave");
+      return;
+    }
     if (found === null) {
       // No run: a repeated message. Reply ok and do nothing more.
       this.send(pi, msg.playerLeaveOk());
@@ -653,7 +715,11 @@ class Ctx {
 
   /** 8.8 */
   onShare(pi: PiId, e: ShareEvent): void {
-    const found = this.runForPi(pi);
+    const found = this.runForPi(pi, e.username);
+    if (found === "wrong_player") {
+      this.error(pi, "wrong_player", `pi ${pi} has no run of '${e.username}'`, "share");
+      return;
+    }
     if (found === null) {
       this.error(pi, "no_player", `room ${pi} has no player`, "share");
       return;
@@ -670,6 +736,7 @@ class Ctx {
     if (i >= 0) run.shares[i] = share;
     else run.shares.push(share);
     this.db.push({ type: "share_upsert", playerId: run.playerId, share: structuredClone(share) });
+    this.refreshIncoming(run);
     const passed = (e.targets ?? []).filter((t) => t <= found.room);
     if (passed.length > 0) {
       this.log(
@@ -681,6 +748,22 @@ class Ctx {
   }
 
   /**
+   * F5: a share can come after the hand-over built player_data (for example a share
+   * after game_finish). Rebuild player_data of each open player_incoming of the run,
+   * so that each later send (also a resend and the resend after a restart) carries the
+   * current data. A Pi that already read an older copy ignores the new copy (same id).
+   */
+  refreshIncoming(run: Run): void {
+    for (const entry of this.s.outbox) {
+      if (entry.event !== "player_incoming" || entry.playerId !== run.playerId) continue;
+      const payload = msg.playerIncoming(entry.id, run.username, this.playerData(run, entry.pi));
+      if (JSON.stringify(payload) === JSON.stringify(entry.payload)) continue;
+      entry.payload = payload;
+      this.db.push({ type: "outbox_update", id: entry.id, payload: structuredClone(payload) });
+    }
+  }
+
+  /**
    * 8.10: an ok with `id` removes only the outbox entry with that id (if it is an open
    * message of this event for this Pi). An ok for an unknown id has no effect. An ok
    * without `id` (old client) removes the oldest open message of this event for the Pi.
@@ -688,7 +771,7 @@ class Ctx {
   ackedEntry(pi: PiId, event: OutboxEvent, id: number): OutboxEntry | null {
     const entry = this.s.outbox.find((x) => x.id === id);
     if (!entry || entry.pi !== pi || entry.event !== event) {
-      this.log("info", `pi ${pi}: ${event}_ok for id ${id} with no open ${event}`);
+      this.log("info", `pi ${pi}: ack of ${event} id ${id} with no open ${event}`);
       return null;
     }
     return entry;
@@ -734,11 +817,19 @@ class Ctx {
     this.outboxRemove(entry.id);
   }
 
-  onOutboxSent(ids: number[]): void {
+  /** F8: the client acked game_finish_ok. Only the entry with that id is removed. */
+  onFinishAck(pi: PiId, id: number): void {
+    const entry = this.ackedEntry(pi, "game_finish_ok", id);
+    if (entry) this.outboxRemove(entry.id);
+  }
+
+  onOutboxSent(ids: number[], finishAckPis: readonly PiId[]): void {
     for (const id of ids) {
       const entry = this.s.outbox.find((x) => x.id === id);
       if (!entry) continue;
-      if (!entry.needsAck) {
+      const noAck =
+        !entry.needsAck || (entry.event === "game_finish_ok" && !finishAckPis.includes(entry.pi));
+      if (noAck) {
         this.outboxRemove(id);
         continue;
       }

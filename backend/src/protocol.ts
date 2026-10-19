@@ -10,6 +10,14 @@
 //   server then removes only the outbox entry with that id. An ok for an unknown id
 //   has no effect (but the seq is acked). An ok without `id` (old client) removes the
 //   oldest open entry of that event for the Pi.
+// - `game_start`, `game_finish`, `player_leave` and `share` can carry `username` (the
+//   player that the Pi shows). The server then applies the event only to the run with
+//   that username, else it replies `error` with code `wrong_player`. Without
+//   `username` (old client), the server uses the room rules of the plan.
+// - `game_finish_ok` carries `id` (the outbox entry id) and `username`. A client that
+//   sends `features: ["game_finish_ack"]` in `auth` replies `game_finish_ack {id}`, and
+//   the server sends the message again until that ack. For a client without this
+//   feature, the server removes `game_finish_ok` after one send (old behaviour).
 
 export type PiId = 1 | 2 | 3 | 4 | 5;
 export const PI_IDS: readonly PiId[] = [1, 2, 3, 4, 5];
@@ -31,6 +39,8 @@ export interface AuthEvent {
    * A value that is not a string with 1 to SESSION_MAX characters is ignored.
    */
   session?: string;
+  /** Optional protocol features of the client. Unknown values are kept but have no effect. */
+  features?: string[];
 }
 interface AppBase {
   /** Delivery sequence number. Undefined for old clients (no dedupe, no ack). */
@@ -42,18 +52,22 @@ export interface PlayerRegisterEvent extends AppBase {
   username: string;
   timestamp?: unknown;
 }
-export interface GameStartEvent extends AppBase {
+/** The player that the Pi shows (trimmed). Undefined for old clients: no check. */
+interface PlayerBase extends AppBase {
+  username?: string;
+}
+export interface GameStartEvent extends PlayerBase {
   event: "game_start";
   timestamp?: unknown;
 }
-export interface GameFinishEvent extends AppBase {
+export interface GameFinishEvent extends PlayerBase {
   event: "game_finish";
   timestamp?: unknown;
 }
-export interface PlayerLeaveEvent extends AppBase {
+export interface PlayerLeaveEvent extends PlayerBase {
   event: "player_leave";
 }
-export interface ShareEvent extends AppBase {
+export interface ShareEvent extends PlayerBase {
   event: "share";
   key: string;
   value: Json;
@@ -72,6 +86,12 @@ export interface PlayerLeftOkEvent extends AppBase {
   id?: number;
 }
 
+export interface GameFinishAckEvent extends AppBase {
+  event: "game_finish_ack";
+  /** The `id` of the game_finish_ok. Required. */
+  id: number;
+}
+
 export type AppEvent =
   | PlayerRegisterEvent
   | GameStartEvent
@@ -79,7 +99,8 @@ export type AppEvent =
   | PlayerLeaveEvent
   | ShareEvent
   | PlayerIncomingOkEvent
-  | PlayerLeftOkEvent;
+  | PlayerLeftOkEvent
+  | GameFinishAckEvent;
 
 export type ClientEvent = AuthEvent | AppEvent;
 
@@ -91,6 +112,7 @@ export const APP_EVENT_NAMES = [
   "share",
   "player_incoming_ok",
   "player_left_ok",
+  "game_finish_ack",
 ] as const;
 export type AppEventName = (typeof APP_EVENT_NAMES)[number];
 
@@ -105,7 +127,12 @@ const EVENT_ALIASES: Record<string, AppEventName | "auth"> = {
   share: "share",
   player_incoming_ok: "player_incoming_ok",
   player_left_ok: "player_left_ok",
+  game_finish_ack: "game_finish_ack",
 };
+
+/** The `features` value of a client that acks game_finish_ok with game_finish_ack. */
+export const FEATURE_GAME_FINISH_ACK = "game_finish_ack";
+export const FEATURES_MAX = 16;
 
 // ---------------------------------------------------------------- server to client
 
@@ -116,13 +143,15 @@ export type ErrorCode =
   | "wrong_pi"
   | "room_busy"
   | "no_player"
-  | "not_playing";
+  | "not_playing"
+  | "wrong_player";
 
 export type ServerMessage =
   | { event: "auth_ok" }
   | { event: "player_register_ok" }
   | { event: "game_start_ok" }
-  | { event: "game_finish_ok" }
+  /** `id` and `username` are missing only in rows of an older server version. */
+  | { event: "game_finish_ok"; id?: number; username?: string }
   | { event: "game_finish_wait"; max_wait: string }
   | { event: "player_leave_ok" }
   | { event: "share_ok" }
@@ -140,7 +169,11 @@ export const msg = {
   authOk: (): ServerMessage => ({ event: "auth_ok" }),
   playerRegisterOk: (): ServerMessage => ({ event: "player_register_ok" }),
   gameStartOk: (): ServerMessage => ({ event: "game_start_ok" }),
-  gameFinishOk: (): ServerMessage => ({ event: "game_finish_ok" }),
+  gameFinishOk: (id: number, username: string): ServerMessage => ({
+    event: "game_finish_ok",
+    id,
+    username,
+  }),
   gameFinishWait: (maxWait: string): ServerMessage => ({
     event: "game_finish_wait",
     max_wait: maxWait,
@@ -260,6 +293,31 @@ export function parseClientObject(data: unknown): ParseResult {
     if ("timestamp" in data) e.timestamp = data.timestamp;
     return e;
   };
+  // Optional `username` of the player that the Pi shows. null = no username.
+  let username: string | undefined;
+  if (
+    (name === "game_start" ||
+      name === "game_finish" ||
+      name === "player_leave" ||
+      name === "share") &&
+    "username" in data &&
+    data.username !== undefined &&
+    data.username !== null
+  ) {
+    const u = typeof data.username === "string" ? data.username.trim() : "";
+    if (u.length < 1 || u.length > USERNAME_MAX) {
+      return fail(
+        "bad_request",
+        `username must be a string with 1 to ${USERNAME_MAX} characters`,
+        seq,
+      );
+    }
+    username = u;
+  }
+  const withUser = <T extends PlayerBase>(e: T): T => {
+    if (username !== undefined) e.username = username;
+    return e;
+  };
 
   switch (name) {
     case "auth": {
@@ -268,6 +326,12 @@ export function parseClientObject(data: unknown): ParseResult {
       const session = data.session;
       if (typeof session === "string" && session.length >= 1 && session.length <= SESSION_MAX) {
         auth.session = session;
+      }
+      const features = data.features;
+      if (Array.isArray(features)) {
+        auth.features = features
+          .filter((f): f is string => typeof f === "string" && f.length <= 64)
+          .slice(0, FEATURES_MAX);
       }
       return { ok: true, event: auth };
     }
@@ -282,11 +346,17 @@ export function parseClientObject(data: unknown): ParseResult {
       return withSeq(withTs<PlayerRegisterEvent>({ event: "player_register", username }));
     }
     case "game_start":
-      return withSeq(withTs<GameStartEvent>({ event: "game_start" }));
+      return withSeq(withUser(withTs<GameStartEvent>({ event: "game_start" })));
     case "game_finish":
-      return withSeq(withTs<GameFinishEvent>({ event: "game_finish" }));
+      return withSeq(withUser(withTs<GameFinishEvent>({ event: "game_finish" })));
     case "player_leave":
-      return withSeq<PlayerLeaveEvent>({ event: "player_leave" });
+      return withSeq(withUser<PlayerLeaveEvent>({ event: "player_leave" }));
+    case "game_finish_ack": {
+      if (!isValidOutboxId(data.id)) {
+        return fail("bad_request", "id must be a positive integer", seq);
+      }
+      return withSeq<GameFinishAckEvent>({ event: "game_finish_ack", id: data.id });
+    }
     case "player_incoming_ok":
     case "player_left_ok": {
       const e: PlayerIncomingOkEvent | PlayerLeftOkEvent = { event: name };
@@ -314,7 +384,9 @@ export function parseClientObject(data: unknown): ParseResult {
       if (targets === "bad") {
         return fail("bad_request", "pi must be null, an integer 1 to 5, or an array of them", seq);
       }
-      return withSeq(withTs<ShareEvent>({ event: "share", key, value: data.value, targets }));
+      return withSeq(
+        withUser(withTs<ShareEvent>({ event: "share", key, value: data.value, targets })),
+      );
     }
   }
 }

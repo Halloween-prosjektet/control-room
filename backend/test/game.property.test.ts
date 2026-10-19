@@ -5,6 +5,9 @@
 // The Pis echo the `id` of player_incoming / player_left in most oks. They also send
 // random duplicate and late oks for ids they received before. Such an ok must never
 // remove an outbox entry other than the one with that id.
+//
+// Some Pis ack game_finish_ok (game_finish_ack {id}); for the others the server removes
+// it after one send. Events carry no username, the right username, or a wrong one.
 
 import { describe, expect, test } from "bun:test";
 import type { Effect } from "../src/game.ts";
@@ -117,15 +120,33 @@ function checkInvariants(ctx: Ctx, effects: Effect[], hadSeq: number | undefined
     lastId = e.id;
     check(sim.db.runs.has(e.playerId), `outbox entry for unknown run ${e.playerId}`);
     check(e.payload.event === e.event, "payload event");
-    check(e.needsAck === (e.event !== "game_finish_ok"), "needsAck");
-    if (e.payload.event === "player_incoming" || e.payload.event === "player_left")
-      check(e.payload.id === e.id, "payload id is not the outbox id");
+    check(e.needsAck, "needsAck");
+    check("id" in e.payload && e.payload.id === e.id, "payload id is not the outbox id");
     if (e.event === "player_incoming") {
       check(s.runs[e.playerId] !== undefined, "player_incoming for a run that is not active");
       check(
         s.slots[e.pi - 1]?.playerId === e.playerId,
         "player_incoming for a run not in that room",
       );
+      // F3 (OutboxCurrent): only while the run is incoming in that room.
+      check(s.slots[e.pi - 1]?.state === "incoming", "player_incoming after the start");
+      // F5: player_data is the current data of the run.
+      const run = s.runs[e.playerId];
+      if (run && e.payload.event === "player_incoming") {
+        const want = Object.fromEntries(
+          run.shares
+            .filter((sh) => sh.targets === null || sh.targets.includes(e.pi))
+            .map((sh) => [sh.key, sh.value]),
+        );
+        check(
+          JSON.stringify(e.payload.player_data) === JSON.stringify(want),
+          "player_data is not the current data",
+        );
+      }
+    }
+    if (e.event === "game_finish_ok") {
+      const username = sim.db.runs.get(e.playerId)?.username;
+      check(e.payload.event === "game_finish_ok" && e.payload.username === username, "finish ok");
     }
     if (e.event === "player_left")
       check(sim.db.runs.get(e.playerId)?.status === "left", "player_left");
@@ -163,6 +184,25 @@ function runSeed(seed: number) {
   const ctx: Ctx = { sim, lastRoom: new Map(), ended: new Map() };
   const pis: PiId[] = [1, 2, 3, 4, 5];
   const stats = { completed: 0, left: 0, waits: 0 };
+  /** Pis whose client acks game_finish_ok. */
+  const finishAck = pis.filter(() => rand() < 0.5);
+  /** The username field of an event: none, the player of the Pi, or a wrong one. */
+  const who = (pi: PiId): Record<string, unknown> => {
+    const r = rand();
+    if (r < 0.4) return {};
+    if (r < 0.85) {
+      const slot = sim.slot(pi);
+      const id = slot.playerId ?? slot.lastLeft;
+      const name = id === null ? undefined : sim.state.runs[id]?.username;
+      return name === undefined ? {} : { username: name };
+    }
+    return { username: pick(NAMES) };
+  };
+  const OK_EVENT: Record<string, string> = {
+    player_incoming: "player_incoming_ok",
+    player_left: "player_left_ok",
+    game_finish_ok: "game_finish_ack",
+  };
 
   const doStep = (fn: () => Effect[], hadSeq: number | undefined, dup = false) => {
     const fx = fn();
@@ -178,13 +218,17 @@ function runSeed(seed: number) {
   const received: { id: number; event: string }[][] = [[], [], [], [], []];
   const sendOut = (ids: number[]) => {
     for (const e of sim.state.outbox) {
-      if (ids.includes(e.id) && e.needsAck) received[e.pi - 1]?.push({ id: e.id, event: e.event });
+      if (ids.includes(e.id)) received[e.pi - 1]?.push({ id: e.id, event: e.event });
     }
-    doStep(() => sim.apply({ type: "outbox_sent", ids }), undefined);
+    doStep(() => sim.apply({ type: "outbox_sent", ids, finishAckPis: finishAck }), undefined);
+    for (const e of sim.state.outbox) {
+      if (ids.includes(e.id) && e.event === "game_finish_ok" && !finishAck.includes(e.pi))
+        fail(ctx, "game_finish_ok kept for a Pi without game_finish_ack");
+    }
   };
   /** An ok with `id`: it can only remove the entry with that id. */
   const idOk = (pi: PiId, event: string, id: number) => {
-    const ok = event === "player_left" ? "player_left_ok" : "player_incoming_ok";
+    const ok = OK_EVENT[event] as string;
     const target = sim.state.outbox.find((x) => x.id === id);
     const seq = (sim.seq[pi - 1] as number) + 1;
     doStep(() => {
@@ -200,7 +244,7 @@ function runSeed(seed: number) {
   };
   /** Acks an open entry like the Godot client: mostly with `id`, sometimes without. */
   const ackEntry = (pi: PiId, e: { id: number; event: string }) => {
-    if (rand() < 0.15)
+    if (rand() < 0.15 && e.event !== "game_finish_ok")
       app(pi, { event: e.event === "player_left" ? "player_left_ok" : "player_incoming_ok" });
     else idOk(pi, e.event, e.id);
   };
@@ -212,9 +256,13 @@ function runSeed(seed: number) {
     const smart = rand() < 0.5;
     const r = rand();
     if (smart && slot.state === "incoming" && r < 0.6) {
-      app(pi, { event: "game_start", timestamp: sim.ts() });
+      app(pi, { event: "game_start", timestamp: sim.ts(), ...who(pi) });
     } else if (smart && slot.state === "playing" && r < 0.6) {
-      app(pi, { event: "game_finish", timestamp: sim.ts(-Math.floor(rand() * 1000)) });
+      app(pi, {
+        event: "game_finish",
+        timestamp: sim.ts(-Math.floor(rand() * 1000)),
+        ...who(pi),
+      });
     } else if (smart && pi === 1 && slot.state === "empty" && r < 0.7) {
       app(1, { event: "player_register", username: pick(NAMES), timestamp: sim.ts() });
     } else if (smart && sim.outboxFor(pi).some((e) => e.sent && e.needsAck)) {
@@ -224,10 +272,14 @@ function runSeed(seed: number) {
       const kind = rand();
       if (kind < 0.12)
         app(pi, { event: "player_register", username: pick(NAMES), timestamp: sim.ts() });
-      else if (kind < 0.24) app(pi, { event: "game_start", timestamp: sim.ts() });
+      else if (kind < 0.24) app(pi, { event: "game_start", timestamp: sim.ts(), ...who(pi) });
       else if (kind < 0.36)
-        app(pi, { event: "game_finish", timestamp: rand() < 0.1 ? "bad" : sim.ts() });
-      else if (kind < 0.42) app(pi, { event: "player_leave" });
+        app(pi, {
+          event: "game_finish",
+          timestamp: rand() < 0.1 ? "bad" : sim.ts(),
+          ...who(pi),
+        });
+      else if (kind < 0.42) app(pi, { event: "player_leave", ...who(pi) });
       else if (kind < 0.54) {
         const t = rand();
         const target = t < 0.3 ? null : t < 0.6 ? pick(pis) : pis.filter(() => rand() < 0.4);
@@ -237,6 +289,7 @@ function runSeed(seed: number) {
           value: { n: i },
           pi: target,
           timestamp: sim.ts(),
+          ...who(pi),
         });
       } else if (kind < 0.56) app(pi, { event: "player_incoming_ok" });
       else if (kind < 0.58) app(pi, { event: "player_left_ok" });
@@ -249,7 +302,11 @@ function runSeed(seed: number) {
         else if (old)
           idOk(pi, old.event === "player_left" ? "player_incoming" : "player_left", old.id);
         else
-          idOk(pi, rand() < 0.5 ? "player_left" : "player_incoming", 1 + Math.floor(rand() * 40));
+          idOk(
+            pi,
+            pick(["player_left", "player_incoming", "game_finish_ok"]),
+            1 + Math.floor(rand() * 40),
+          );
       } else if (kind < 0.82) {
         // outbox.ts sends a random part of the outbox
         sendOut(sim.state.outbox.filter(() => rand() < 0.6).map((e) => e.id));

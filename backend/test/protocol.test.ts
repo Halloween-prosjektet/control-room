@@ -62,6 +62,17 @@ describe("parse: auth", () => {
   test.each(["0", "6", "1.5", '"1"', "null"])("pi %s is bad", (pi) => {
     expect(bad(`{"event":"auth","pi":${pi}}`).code).toBe("bad_request");
   });
+  test("auth with features", () => {
+    expect(ok('{"event":"auth","pi":2,"features":["game_finish_ack",5,"x"]}')).toEqual({
+      event: "auth",
+      pi: 2,
+      features: ["game_finish_ack", "x"],
+    });
+    expect(ok('{"event":"auth","pi":2,"features":"game_finish_ack"}')).toEqual({
+      event: "auth",
+      pi: 2,
+    });
+  });
   test("auth with session", () => {
     expect(ok(`{"event":"auth","pi":2,"session":"ab12"}`)).toEqual({
       event: "auth",
@@ -117,6 +128,47 @@ describe("parse: game_start, game_finish, leave, oks", () => {
       event: "game_finish",
       timestamp: 42,
     });
+  });
+  test("username in game_start, game_finish, player_leave and share", () => {
+    for (const e of ["game_start", "game_finish", "player_leave"]) {
+      expect(ok(`{"event":"${e}","username":" Ola ","seq":2}`)).toEqual({
+        event: e,
+        username: "Ola",
+        seq: 2,
+      } as never);
+      expect(ok(`{"event":"${e}","username":null}`)).toEqual({ event: e } as never);
+      for (const bad of ['""', '"  "', "5", "[]", JSON.stringify("x".repeat(65))]) {
+        const r = parseClientMessage(`{"event":"${e}","username":${bad},"seq":4}`);
+        expect(r).toMatchObject({ ok: false, code: "bad_request", eventName: e, seq: 4 });
+      }
+    }
+    expect(ok('{"event":"share","key":"k","value":1,"username":"Ola"}')).toEqual({
+      event: "share",
+      key: "k",
+      value: 1,
+      targets: null,
+      username: "Ola",
+    });
+    // Other events ignore a username field.
+    expect(ok('{"event":"player_incoming_ok","username":5}')).toEqual({
+      event: "player_incoming_ok",
+    });
+  });
+  test("game_finish_ack needs an id", () => {
+    expect(ok('{"event":"game_finish_ack","id":9,"seq":1}')).toEqual({
+      event: "game_finish_ack",
+      id: 9,
+      seq: 1,
+    });
+    for (const bad of ["", ',"id":null', ',"id":0', ',"id":"9"']) {
+      const r = parseClientMessage(`{"event":"game_finish_ack"${bad},"seq":2}`);
+      expect(r).toMatchObject({
+        ok: false,
+        code: "bad_request",
+        eventName: "game_finish_ack",
+        seq: 2,
+      });
+    }
   });
   test("simple events", () => {
     for (const e of ["player_leave", "player_incoming_ok", "player_left_ok"]) {
@@ -204,7 +256,7 @@ describe("builders", () => {
     expect(msg.authOk()).toEqual({ event: "auth_ok" });
     expect(msg.playerRegisterOk()).toEqual({ event: "player_register_ok" });
     expect(msg.gameStartOk()).toEqual({ event: "game_start_ok" });
-    expect(msg.gameFinishOk()).toEqual({ event: "game_finish_ok" });
+    expect(msg.gameFinishOk(3, "u")).toEqual({ event: "game_finish_ok", id: 3, username: "u" });
     expect(msg.gameFinishWait("x")).toEqual({ event: "game_finish_wait", max_wait: "x" });
     expect(msg.playerLeaveOk()).toEqual({ event: "player_leave_ok" });
     expect(msg.shareOk()).toEqual({ event: "share_ok" });

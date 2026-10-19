@@ -244,6 +244,9 @@ function applyOne(db: Database, e: Effect): void {
     case "outbox_mark_sent":
       db.run("UPDATE outbox SET sent = 1 WHERE id = ?", [e.id]);
       break;
+    case "outbox_update":
+      db.run("UPDATE outbox SET payload = ? WHERE id = ?", [JSON.stringify(e.payload), e.id]);
+      break;
     case "send":
     case "log":
       break;
@@ -525,11 +528,16 @@ export function stateSnapshot(db: Database, tzName: string, connected: PiId[]) {
 }
 
 /**
- * player_incoming and player_left carry the outbox id. A row from an older server
- * version has no `id` in the payload: add it, so that new clients can echo it.
+ * player_incoming, player_left and game_finish_ok carry the outbox id. A row from an
+ * older server version has no `id` in the payload: add it, so that new clients can
+ * echo it. (An old game_finish_ok row also has no username; the client then does no
+ * username check. Such a row has needs_ack = 0, so it is removed after one send.)
  */
 function withOutboxId(id: number, m: ServerMessage): ServerMessage {
-  if ((m.event === "player_incoming" || m.event === "player_left") && m.id === undefined) {
+  if (
+    (m.event === "player_incoming" || m.event === "player_left" || m.event === "game_finish_ok") &&
+    m.id === undefined
+  ) {
     return { ...m, id };
   }
   return m;

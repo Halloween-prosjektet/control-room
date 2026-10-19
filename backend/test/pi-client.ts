@@ -1,14 +1,22 @@
 // Test client that acts like the Godot ControlRoomClient
 // (godot/addons/control_room_client/control_room_client.gd):
 //
-// - On open it sends {"event":"auth","pi":N,"session":S}. Each message before
+// - On open it sends {"event":"auth","pi":N,"session":S,"features":["game_finish_ack"]}
+//   (no features when `finishAck` is false, like an old client). Each message before
 //   auth_ok counts as one failed auth attempt (max 3), as in the Godot client.
 // - Each event gets the next seq. Events are only sent after auth_ok and when the
 //   queue is empty; else they go in the queue.
 // - "ack" n removes all events with seq <= n from `unacked` and the queue.
 // - After auth_ok it sends `unacked` again first, then the queue.
-// - player_incoming -> player_incoming_ok; player_left -> player_left_ok. The ok
-//   echoes the `id` of the message (when it has one), for each copy it gets.
+// - player_incoming -> player_incoming_ok; player_left -> player_left_ok;
+//   game_finish_ok (with id, when `finishAck`) -> game_finish_ack. The reply echoes the
+//   `id` of the message (when it has one), for each copy it gets.
+// - F6: a copy with an id that it saw before changes nothing (`signals` gets one entry
+//   per message). player_left for another player than `current` changes nothing.
+//   game_finish_ok for another player than `current` (when `current` is known) is
+//   ignored.
+// - F2: game_start, game_finish, player_leave and share carry `username` of `current`
+//   (when known). register sets `current`; leave clears it.
 
 import type { ServerMessage } from "../src/protocol.ts";
 
@@ -36,8 +44,16 @@ export class PiClient {
   current: { username: string; data: unknown } | null = null;
   /** Send no auth on open (to test the pre-auth buffer). */
   manualAuth = false;
-  /** false: do not send player_incoming_ok / player_left_ok (the test sends them). */
+  /** false: do not send player_incoming_ok / player_left_ok / game_finish_ack (the test sends them). */
   autoOk = true;
+  /** false: act like an old client (no auth feature, no game_finish_ack). */
+  finishAck = true;
+  /** false: act like an old client (no username in events). */
+  sendUsername = true;
+  /** The "signals" of the Godot client, once per message. */
+  signals: { event: string; username?: string; data?: unknown }[] = [];
+  /** Keys "event:id:username" of the messages that it acted on (F6). */
+  private seen = new Set<string>();
   private authAttempts = 0;
 
   constructor(
@@ -82,7 +98,11 @@ export class PiClient {
 
   sendAuth(): void {
     this.authAttempts += 1;
-    this.raw({ event: "auth", pi: this.pi, session: this.session });
+    this.raw(
+      this.finishAck
+        ? { event: "auth", pi: this.pi, session: this.session, features: ["game_finish_ack"] }
+        : { event: "auth", pi: this.pi, session: this.session },
+    );
   }
 
   raw(data: unknown): void {
@@ -109,6 +129,7 @@ export class PiClient {
     this.sendQueue = [];
     this.unacked = [];
     this.current = null;
+    this.seen.clear();
   }
 
   // ------------------------------------------------------------ events
@@ -123,20 +144,28 @@ export class PiClient {
     return payload.seq;
   }
 
+  /** The username field of an event (F2): the current player, when known. */
+  private who(): Record<string, unknown> {
+    return this.sendUsername && this.current ? { username: this.current.username } : {};
+  }
+
   register(username: string): number {
+    this.current = { username, data: null };
     return this.sendEvent({ event: "player_register", username, timestamp: ts() });
   }
   start(): number {
-    return this.sendEvent({ event: "game_start", timestamp: ts() });
+    return this.sendEvent({ event: "game_start", timestamp: ts(), ...this.who() });
   }
   finish(): number {
-    return this.sendEvent({ event: "game_finish", timestamp: ts() });
+    return this.sendEvent({ event: "game_finish", timestamp: ts(), ...this.who() });
   }
   leave(): number {
-    return this.sendEvent({ event: "player_leave" });
+    const seq = this.sendEvent({ event: "player_leave", ...this.who() });
+    this.current = null;
+    return seq;
   }
   share(key: string, value: unknown, pi: unknown = null): number {
-    return this.sendEvent({ event: "share", key, value, pi, timestamp: ts() });
+    return this.sendEvent({ event: "share", key, value, pi, timestamp: ts(), ...this.who() });
   }
 
   /** True when the server acked all events. */
@@ -168,6 +197,15 @@ export class PiClient {
   }
 
   // ------------------------------------------------------------ internals
+
+  /** F6: true for the first copy of a message (a message with no id is always new). */
+  private firstCopy(event: string, id: unknown, username: unknown): boolean {
+    if (typeof id !== "number") return true;
+    const key = `${event}:${id}:${String(username)}`;
+    if (this.seen.has(key)) return false;
+    this.seen.add(key);
+    return true;
+  }
 
   private sendRaw(payload: Payload): boolean {
     const ws = this.ws;
@@ -212,12 +250,34 @@ export class PiClient {
         this.sendQueue = this.sendQueue.filter((p) => p.seq > data.seq);
         break;
       case "player_incoming":
-        this.current = { username: data.username, data: data.player_data };
         if (this.autoOk) this.sendEvent(withId({ event: "player_incoming_ok" }, data.id));
+        if (this.firstCopy(data.event, data.id, data.username)) {
+          this.current = { username: data.username, data: data.player_data };
+          this.signals.push({ event: data.event, username: data.username, data: data.player_data });
+        }
         break;
       case "player_left":
-        this.current = null;
         if (this.autoOk) this.sendEvent(withId({ event: "player_left_ok" }, data.id));
+        if (
+          this.firstCopy(data.event, data.id, data.username) &&
+          this.current?.username === data.username
+        ) {
+          this.current = null;
+          this.signals.push({ event: data.event, username: data.username });
+        }
+        break;
+      case "game_finish_ok":
+        if (this.autoOk && this.finishAck && typeof data.id === "number") {
+          this.sendEvent({ event: "game_finish_ack", id: data.id });
+        }
+        if (
+          this.firstCopy(data.event, data.id, data.username) &&
+          (data.username === undefined ||
+            this.current === null ||
+            this.current.username === data.username)
+        ) {
+          this.signals.push({ event: data.event, username: data.username });
+        }
         break;
       default:
         break;

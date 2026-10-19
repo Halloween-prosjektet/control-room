@@ -38,7 +38,7 @@ export type Socket = ServerWebSocket<ConnData>;
 
 export interface ConnectionHandlers {
   /** A valid auth for Pi `pi`. The handler must send auth_ok first. */
-  onAuth(pi: PiId, session: string | undefined): void;
+  onAuth(pi: PiId, session: string | undefined, features: readonly string[]): void;
   /** A text frame (not auth) from an authenticated Pi. */
   onMessage(pi: PiId, text: string): void;
   log(level: "info" | "warn", message: string): void;
@@ -131,7 +131,7 @@ export class Connections {
       }
       return;
     }
-    const { pi, session } = parsed.event;
+    const { pi, session, features } = parsed.event;
 
     const old = this.byPi.get(pi);
     if (old !== undefined && old !== ws) {
@@ -145,7 +145,7 @@ export class Connections {
     ws.data.pi = pi;
     this.byPi.set(pi, ws);
 
-    this.handlers.onAuth(pi, session);
+    this.handlers.onAuth(pi, session, features ?? []);
 
     // Messages from before the auth, in order.
     const buffered = ws.data.buffer;

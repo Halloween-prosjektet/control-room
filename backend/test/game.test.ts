@@ -201,18 +201,18 @@ describe("finish (8.5) and hand over (8.6)", () => {
       finishedAt: BASE + 4500,
       durationMs: 4500,
     });
-    expect(sim.outboxFor(1).map((e) => [e.event, e.needsAck])).toEqual([["game_finish_ok", false]]);
+    expect(sim.outboxFor(1).map((e) => [e.event, e.needsAck])).toEqual([["game_finish_ok", true]]);
     expect(sim.outboxFor(2).map((e) => e.payload)).toEqual([
       { event: "player_incoming", id: anyId, username: "Ola", player_data: { color: "red" } },
     ]);
   });
 
-  test("game_finish_ok without ack is removed after one send", () => {
+  test("game_finish_ok to a client without game_finish_ack is removed after one send", () => {
     const sim = new Sim();
     toRoom(sim, "A", 1);
     sim.start(1);
     sim.finish(1);
-    expect(sim.deliver(1)).toEqual([{ event: "game_finish_ok" }]);
+    expect(sim.deliver(1)).toEqual([{ event: "game_finish_ok", id: anyId, username: "A" }]);
     expect(sim.outboxFor(1)).toEqual([]);
   });
 
@@ -255,7 +255,9 @@ describe("finish (8.5) and hand over (8.6)", () => {
     expect(sim.username(3)).toBe("A");
     expect(sim.username(2)).toBe("B");
     expect(sim.slot(1).state).toBe("empty");
-    expect(sim.outboxFor(1).map((e) => e.payload)).toEqual([{ event: "game_finish_ok" }]);
+    expect(sim.outboxFor(1).map((e) => e.payload)).toEqual([
+      { event: "game_finish_ok", id: anyId, username: "B" },
+    ]);
     expect(sim.outboxFor(2).map((e) => e.payload.event)).toEqual([
       "game_finish_ok",
       "player_incoming",

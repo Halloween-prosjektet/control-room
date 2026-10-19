@@ -260,6 +260,98 @@ describe("server", () => {
     expect(env.srv.room.state.outbox.filter((e) => e.pi === 2)).toEqual([]);
   });
 
+  test("F8: game_finish_ok is sent again until game_finish_ack, also after a reconnect", async () => {
+    const env = await setup();
+    const p1 = pi(env, 1);
+    p1.autoOk = false;
+    await p1.waitAck(p1.register("A"));
+    await play(env, 1);
+    await p1.waitCount("game_finish_ok", 2); // resent (ACK_RETRY_MS = 100)
+    const ok = p1.events("game_finish_ok")[0];
+    expect(ok).toEqual({ event: "game_finish_ok", id: expect.any(Number), username: "A" });
+    await p1.disconnect();
+    const n = p1.count("game_finish_ok");
+    await p1.online();
+    await p1.waitCount("game_finish_ok", n + 1);
+    expect(p1.received.filter((r) => r.conn === 2).map((r) => r.msg.event)[1]).toBe(
+      "game_finish_ok",
+    );
+    expect(env.srv.room.state.outbox.some((e) => e.pi === 1)).toBe(true);
+    await p1.waitAck(p1.sendEvent({ event: "game_finish_ack", id: ok && "id" in ok ? ok.id : 0 }));
+    expect(env.srv.room.state.outbox.some((e) => e.pi === 1)).toBe(false);
+    // F6: the client acted on game_finish_ok one time only.
+    expect(p1.signals.filter((s) => s.event === "game_finish_ok")).toEqual([
+      { event: "game_finish_ok", username: "A" },
+    ]);
+  });
+
+  test("F8: an old client (no game_finish_ack feature) gets game_finish_ok one time", async () => {
+    const env = await setup();
+    const p1 = pi(env, 1);
+    await p1.disconnect();
+    p1.finishAck = false;
+    await p1.online();
+    await p1.waitAck(p1.register("A"));
+    await play(env, 1);
+    await p1.waitCount("game_finish_ok", 1);
+    await waitUntil(() => !env.srv.room.state.outbox.some((e) => e.pi === 1), "removed");
+    await Bun.sleep(250);
+    expect(p1.count("game_finish_ok")).toBe(1);
+    expect(p1.received.some((r) => r.msg.event === "error")).toBe(false);
+  });
+
+  test("F2: player_leave with username removes the player that quit, not the next one", async () => {
+    const env = await setup();
+    const [p1, p2] = [pi(env, 1), pi(env, 2)];
+    await p1.waitAck(p1.register("A"));
+    await play(env, 1);
+    await incoming(env, 2, "A");
+    await p2.waitAck(p2.start());
+    await p1.waitAck(p1.register("B"));
+    await play(env, 1);
+    await p1.waitCount("game_finish_wait", 1);
+    await p2.waitAck(p2.finish()); // A to room 3, B to room 2
+    expect(slots(env).slice(0, 3)).toEqual([
+      ["empty", null],
+      ["incoming", "B"],
+      ["incoming", "A"],
+    ]);
+    // A says "I stop" at Pi 2.
+    await p2.waitAck(p2.sendEvent({ event: "player_leave", username: "A" }));
+    expect(slots(env).slice(0, 3)).toEqual([
+      ["empty", null],
+      ["incoming", "B"],
+      ["empty", null],
+    ]);
+    // A wrong username gets wrong_player and changes nothing.
+    await p2.waitAck(p2.sendEvent({ event: "game_start", username: "A" }));
+    expect(p2.events("error").at(-1)).toMatchObject({ code: "wrong_player" });
+    expect(slots(env)[1]).toEqual(["incoming", "B"]);
+  });
+
+  test("F6: copies of player_incoming give one signal; player_left of another player is ignored", async () => {
+    const env = await setup();
+    const [p1, p2] = [pi(env, 1), pi(env, 2)];
+    p2.autoOk = false;
+    await p1.waitAck(p1.register("A"));
+    await play(env, 1);
+    await p2.waitCount("player_incoming", 3); // resent until the ok
+    const m = p2.events("player_incoming")[0];
+    const id = m && "id" in m ? m.id : 0;
+    await p2.waitAck(p2.sendEvent({ event: "player_incoming_ok", id }));
+    expect(p2.signals.filter((s) => s.event === "player_incoming")).toHaveLength(1);
+    // A player_left for another player (a late copy): no change at the Pi.
+    p2.autoOk = true;
+    const raw = { event: "player_left", id: 999, username: "Other" };
+    (p2 as unknown as { onFrame: (ws: unknown, c: number, t: string) => void }).onFrame(
+      p2.ws,
+      p2.conn,
+      JSON.stringify(raw),
+    );
+    expect(p2.current?.username).toBe("A");
+    expect(p2.signals.filter((s) => s.event === "player_left")).toEqual([]);
+  });
+
   test("Pi disconnects and connects again: the outbox is sent again", async () => {
     const env = await setup();
     const [p1, p2] = [pi(env, 1), pi(env, 2)];
@@ -295,7 +387,7 @@ describe("server", () => {
     await p1.waitAck(leaveSeq);
     await waitUntil(
       () => !env.srv.room.state.outbox.some((e) => e.pi === 1),
-      "game_finish_ok removed after one send",
+      "game_finish_ok removed after game_finish_ack",
     );
   });
 
@@ -362,7 +454,12 @@ describe("server", () => {
     const p1 = pi(env, 1);
     await p1.waitAck(p1.register("First"));
     await play(env, 1);
-    expect(env.srv.room.state.pis[0]?.lastSeq).toBe(3);
+    // The game_finish_ack of game_finish_ok is the 4th event.
+    await waitUntil(() => env.srv.room.state.outbox.length === 0, "outbox empty");
+    await waitUntil(() => p1.allAcked(), "pi 1 all acked");
+    const last = p1.nextSeq - 1;
+    expect(last).toBe(4);
+    expect(env.srv.room.state.pis[0]?.lastSeq).toBe(last);
 
     // Same session after a reconnect: seq 1 is a repeated event.
     await p1.disconnect();
@@ -370,7 +467,7 @@ describe("server", () => {
     const acks = p1.events("ack").length;
     p1.raw({ event: "game_start", seq: 1 });
     await p1.waitCount("ack", acks + 1);
-    expect(p1.events("ack").at(-1)).toEqual({ event: "ack", seq: 3 });
+    expect(p1.events("ack").at(-1)).toEqual({ event: "ack", seq: last });
 
     // App restart: new session, seq starts at 1 again and is processed.
     await p1.restartApp();

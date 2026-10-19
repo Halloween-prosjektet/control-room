@@ -22,7 +22,7 @@ import { applyEffects, createQueries, getSession, loadState, openDb, setSession 
 import { type Input, type State, type StepOptions, step } from "./game.ts";
 import { createHttpHandler } from "./http.ts";
 import { Outbox } from "./outbox.ts";
-import { msg, type PiId } from "./protocol.ts";
+import { FEATURE_GAME_FINISH_ACK, msg, type PiId } from "./protocol.ts";
 
 export type LogLevel = "info" | "warn" | "error";
 export type Logger = (level: LogLevel, message: string) => void;
@@ -49,6 +49,12 @@ export class ControlRoom {
   private readonly stepOptions: Partial<StepOptions>;
   private readonly log: Logger;
   private readonly now: () => number;
+  /**
+   * F8: Pis whose current client acks game_finish_ok (auth feature "game_finish_ack").
+   * For the other Pis the server removes game_finish_ok after one send (old clients).
+   * Each auth sets the value again, before the outbox is sent again.
+   */
+  private readonly finishAckPis = new Set<PiId>();
 
   constructor(
     readonly db: Database,
@@ -64,7 +70,7 @@ export class ControlRoom {
     };
     this.state = loadState(db);
     this.connections = new Connections({
-      onAuth: (pi, session) => this.onAuth(pi, session),
+      onAuth: (pi, session, features) => this.onAuth(pi, session, features),
       onMessage: (pi, text) => this.process({ type: "message", pi, text }),
       log: (level, message) => this.log(level, message),
     });
@@ -72,7 +78,8 @@ export class ControlRoom {
       entries: () => this.state.outbox,
       send: (pi, m) => this.connections.send(pi, m),
       isReady: (pi) => this.connections.isReady(pi),
-      sent: (ids) => this.process({ type: "outbox_sent", ids }),
+      sent: (ids) =>
+        this.process({ type: "outbox_sent", ids, finishAckPis: [...this.finishAckPis] }),
       now: this.now,
       retryMs: config.ackRetryMs,
     });
@@ -98,8 +105,10 @@ export class ControlRoom {
     return true;
   }
 
-  /** 8.1: a valid auth. Session rule, then auth_ok, then the outbox again. */
-  private onAuth(pi: PiId, session: string | undefined): void {
+  /** 8.1: a valid auth. Session rule, features, then auth_ok, then the outbox again. */
+  private onAuth(pi: PiId, session: string | undefined, features: readonly string[]): void {
+    if (features.includes(FEATURE_GAME_FINISH_ACK)) this.finishAckPis.add(pi);
+    else this.finishAckPis.delete(pi);
     if (session !== undefined && getSession(this.db, pi) !== session) {
       this.log("info", `pi ${pi}: new client session ${session}; seq reset`);
       this.process({ type: "reset_seq", pi }, () => setSession(this.db, pi, session));

@@ -59,6 +59,12 @@ export class MirrorDb {
           if (entry) entry.sent = true;
           break;
         }
+        case "outbox_update": {
+          const entry = this.outbox.get(e.id);
+          if (!entry) throw new Error("outbox_update of an unknown entry");
+          entry.payload = structuredClone(e.payload);
+          break;
+        }
         case "send":
         case "log":
           break;

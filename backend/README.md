@@ -95,6 +95,67 @@ These rules are added to the protocol in the plan. The Godot client uses them.
 - At start, the server adds the `id` to an outbox message from an older server
   version that has no `id`.
 
+### Player check (design finding F2)
+
+- `game_start`, `game_finish`, `player_leave` and `share` can have `username`:
+  the player that the Pi shows. The server removes the spaces at the start and
+  at the end, as for `player_register`. If `username` is not a string with 1 to
+  64 characters, the server replies `error` with code `bad_request`. `null` is
+  the same as no `username`.
+- `game_start` and `game_finish`: if the run in the room has a different
+  username, the server replies `error` with code `wrong_player` and changes
+  nothing.
+- `player_leave` and `share`: Pi N can mean the run in room N, or the run that
+  left room N and is `incoming` in room N+1. The server uses the run with that
+  username. If no run of these two has that username, the server replies
+  `error` with code `wrong_player` and changes nothing. For `player_leave` with
+  no such run at all, the reply is `player_leave_ok` (a repeated message).
+- With no `username` (old client), the server uses the rules of the plan.
+- The server acks the `seq` of an event that gets `wrong_player`.
+
+### Stale messages and late shares (F3, F5)
+
+- `game_start` in room M removes the open `player_incoming` of that run for
+  Pi M. If the server sent it, a late `player_incoming_ok` with no `id` from an
+  old client can still come: the server adds 1 to `stale_incoming_oks`.
+- When the server stores a share, it builds `player_data` again for each open
+  `player_incoming` of the run. Thus each later send (also a resend and a send
+  after a restart) has the current data. A share that comes after
+  `game_finish`, but before Pi N+1 reads `player_incoming`, gets to Pi N+1. If
+  Pi N+1 read an earlier copy, it ignores the new copy (same `id`), and the
+  share does not get to that Pi. A share for a room that the run passed is
+  stored and logged only.
+
+### `game_finish_ok` with an ack (F8)
+
+- `game_finish_ok` has `id` (the outbox message id) and `username`.
+- The `auth` message can have `features`, a list of strings. A client with
+  `"game_finish_ack"` in `features` replies `{"event":"game_finish_ack","id":n}`
+  to each copy of `game_finish_ok`. The server sends `game_finish_ok` again
+  (each `ACK_RETRY_MS`, and after each `auth_ok`) until it gets this ack. Only
+  the message with that `id` is removed. `game_finish_ack` with no valid `id`
+  gets `error` with code `bad_request`.
+- Old clients (no `features`): the server removes `game_finish_ok` after one
+  send, as before. Thus an old client gets each `game_finish_ok` one time, but
+  it can lose it if the connection breaks.
+- Each `auth` sets the feature of the Pi again. The server keeps it in memory
+  only (a restart needs a new `auth` before a send).
+
+### Client rules (F6)
+
+The Godot client, `refrence.py`, `test/pi-client.ts` and `tools/fake-pi.ts`:
+
+- send `username` (the current player, when known) in `game_start`,
+  `game_finish`, `player_leave` and `share`;
+- send `features: ["game_finish_ack"]` in `auth`, and `game_finish_ack` for
+  each copy of `game_finish_ok` that has an `id`;
+- reply to each copy of `player_incoming`, `player_left` and `game_finish_ok`,
+  but do the action and emit the signal one time only for each message (same
+  event, `id` and `username`);
+- ignore `player_left` for another player than the current player;
+- ignore `game_finish_ok` for another player than the current player (when the
+  current player is known).
+
 ## Connections
 
 - The server sends `auth_ok` for each valid `auth`. Then it sends all outbox
@@ -114,7 +175,7 @@ The schema is the schema in plan section 9, with these additions:
 | Table | Addition |
 | --- | --- |
 | `room_slots` | `notified` (0 or 1): the Pi of the room possibly knows the player. |
-| `outbox` | `player_id` (the run of the message) and `sent` (0 or 1). |
+| `outbox` | `player_id` (the run of the message) and `sent` (0 or 1). The `sent` mark is persisted, so a restart keeps the rule "send `player_left` only if `player_incoming` was sent" (F4). |
 | `pi_delivery` | New table: `pi`, `last_seq`, `stale_incoming_oks`, `session`. |
 
 Times are ISO 8601 text in UTC. The HTTP endpoints write times in `TZ_NAME`.
@@ -126,6 +187,7 @@ start. It does not start with a database from a newer server.
 | File | Covers |
 | --- | --- |
 | `test/game.test.ts`, `test/game.property.test.ts` | The state machine. |
+| `test/findings.test.ts` | The design findings F2 to F8 of `../verification/server/README.md` (also across a restart). |
 | `test/db.test.ts` | Schema, transactions, "a restart gives the same state", leaderboard queries. |
 | `test/http.test.ts` | The HTTP endpoints. |
 | `test/server.test.ts` | The real server on a random port with five clients that act like the Godot client (`test/pi-client.ts`). It includes a soak test: 20 runs with random disconnects. |

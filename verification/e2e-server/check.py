@@ -40,6 +40,8 @@ def room_times_ok(row):
 
 rooms = state.get("rooms", [])
 check(len(rooms) == 5 and all(r.get("state") == "empty" for r in rooms), "all 5 rooms are empty at the end")
+check(state.get("outbox_size") == 0,
+      f"outbox is empty at the end: every player_incoming, player_left and game_finish_ok was acked (got {state.get('outbox')})")
 
 if scenario in ("1", "3", "4"):
     check(len(board) == 1, f"exactly 1 completed run (got {len(board)})")
