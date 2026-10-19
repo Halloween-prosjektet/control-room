@@ -182,6 +182,7 @@ connections). A check for all scenarios: the accepted seq values are exactly 1..
 in order, so there is no loss, no duplicate and no reorder after the dedupe.
 
 - `normal`, `early`, `auth2`, `auth3`, `events`, `giveup`: as before (the client also ends with an empty `send_queue` and `unacked` where the server acks).
+- `events`: the client sends `player_incoming_ok` and `player_left_ok` with the `id` of the message (as an integer). For a `player_incoming` with no `id`, the ok has no `id`.
 - `drop`: the server kills the connection in a stream of 150 events. After the reconnect there is no loss, no duplicate after dedupe, and the order is kept.
 - `lost_after_send`: the server reads the event `target`, does not ack it, and kills the connection. The client sends it again after the reconnect. The server sees the known seq, drops it as a duplicate and acks.
 
@@ -198,3 +199,4 @@ has the same rules in the protocol.
 6. `error.event_name`: an `error` message has `"event": "error"`. The name of the event that failed is in `event_name`, not in `event`. The client reads `event_name` and gives it to the signal `server_error(code, message, event)`.
 7. Seq reset: if a game process restarts, the client counter starts again at 1. The server needs a way to know this (for example a new session id, or a reset when the Pi is idle). The current rules have no such way: see "Other observations".
 8. Old clients (no `seq`): the server processes each such event and sends no ack.
+9. `id` on `player_incoming` and `player_left`: the server puts a unique integer `id` (the outbox message id) in each `player_incoming` and `player_left`. The server can send the same message more than one time (after a reconnect, and by timer). The client sends one ok for each copy that it gets, with the same `id`. The server removes only the outbox message with that `id`. An ok for an unknown `id`, or for a message that the server removed before, has no effect (the server still acks its `seq`). Thus a late or duplicate ok cannot remove a newer message. An ok with no `id` (old client) removes the oldest open message of that event for the Pi.

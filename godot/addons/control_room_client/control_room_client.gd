@@ -134,16 +134,12 @@ func event_handler(data: Dictionary) -> void:
 			game_finish_ok.emit()
 		"player_left":
 			current_player = {}
-			send_event({
-				"event": "player_left_ok",
-			})
+			send_event(_ok_with_id("player_left_ok", data))
 			player_left.emit(str(data.get("username", "")))
 		"player_incoming":
 			current_player["username"] = data.get("username", null)
 			current_player["data"] = data.get("player_data", null)
-			send_event({
-				"event": "player_incoming_ok",
-			})
+			send_event(_ok_with_id("player_incoming_ok", data))
 			player_incoming.emit(str(data.get("username", "")), data.get("player_data", null))
 		"error":
 			var code := str(data.get("code", ""))
@@ -152,6 +148,16 @@ func event_handler(data: Dictionary) -> void:
 			var event := str(data.get("event_name", ""))
 			print("server error %s: %s" % [code, message])
 			server_error.emit(code, message, event)
+
+
+# Svaret på player_incoming / player_left. Hvis meldingen har "id", sendes den
+# samme "id" tilbake, slik at serveren bare fjerner akkurat den meldingen.
+func _ok_with_id(event: String, data: Dictionary) -> Dictionary:
+	var payload := {"event": event}
+	var id: Variant = data.get("id", null)
+	if id is int or id is float:
+		payload["id"] = int(id)
+	return payload
 
 
 # Starter tilkoblingen. Kobler til på nytt automatisk hvis forbindelsen mistes.

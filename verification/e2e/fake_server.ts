@@ -265,16 +265,24 @@ const scenarios: Record<string, Scenario> = {
         () => ws.send("[1,2]"),
         () => send(ws, { event: "mystery_event" }),
         () => send(ws, { event: "game_finish_ok" }),
-        () => send(ws, { event: "player_incoming", username: "alice", player_data: { score: 3 } }),
-        () => send(ws, { event: "player_left", username: "alice" }),
+        () =>
+          send(ws, { event: "player_incoming", id: 41, username: "alice", player_data: { score: 3 } }),
+        () => send(ws, { event: "player_left", id: 42, username: "alice" }),
         () => send(ws, { event: "error", code: "E1", message: "boom", event_name: "share" }),
+        // An older server sends no id: the ok has no id.
+        () => send(ws, { event: "player_incoming", username: "bob", player_data: {} }),
       ];
       steps.forEach((s, i) => setTimeout(s, 200 + i * 100));
     },
     verify(f) {
       const got = names(events());
-      const want = ["player_incoming_ok", "player_left_ok"];
+      const want = ["player_incoming_ok", "player_left_ok", "player_incoming_ok"];
       if (!eq(got, want)) f.push(`client acks: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+      // The ok echoes the id of the message (as an integer), and has no id when the message has none.
+      const ids = events().map((e) => ("id" in e.msg ? e.msg.id : "none"));
+      if (!eq(ids, [41, 42, "none"])) f.push(`echoed ids: got ${JSON.stringify(ids)}, want [41,42,"none"]`);
+      const raw = log.filter((e) => e.dir === "in" && "id" in e.msg).map((e) => e.msg.id);
+      if (!raw.every((x) => Number.isInteger(x))) f.push(`echoed id is not an integer: ${JSON.stringify(raw)}`);
     },
   },
 };
