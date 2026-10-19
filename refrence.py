@@ -6,6 +6,16 @@ from datetime import datetime, timezone
 import websockets as ws
 
 
+def ok_with_id(event, data):
+    # Svaret på player_incoming / player_left. Hvis meldingen har "id", sendes den
+    # samme "id" tilbake, slik at serveren bare fjerner akkurat den meldingen.
+    payload = {"event": event}
+    msg_id = data.get("id")
+    if isinstance(msg_id, (int, float)) and not isinstance(msg_id, bool):
+        payload["id"] = int(msg_id)
+    return payload
+
+
 class Client:
     def __init__(self) -> None:
         self.uri = "0.0.0.0:443"  # Eksempel uri
@@ -178,20 +188,12 @@ class Client:
                 self.on_server_error(code, message, data.get("event_name", ""))
             case "player_left":
                 self.current_player = {}
-                await self.send_event(
-                    {
-                        "event": "player_left_ok",
-                    }
-                )
+                await self.send_event(ok_with_id("player_left_ok", data))
                 self.on_player_left(data.get("username", ""))
             case "player_incoming":
                 self.current_player["username"] = data.get("username")
                 self.current_player["data"] = data.get("player_data", None)
-                await self.send_event(
-                    {
-                        "event": "player_incoming_ok",
-                    }
-                )
+                await self.send_event(ok_with_id("player_incoming_ok", data))
                 self.on_player_incoming(
                     data.get("username", ""), data.get("player_data", None)
                 )
