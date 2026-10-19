@@ -32,6 +32,7 @@ var wait_flag_after_wait := false
 var wait_flag_after_ok := true
 var snap_incoming := {}
 var snap_left: Variant = null
+var ok_log: Array = []       # the ok event that the client queued for each player_incoming / player_left
 
 
 func check(cond: bool, msg: String) -> void:
@@ -57,10 +58,13 @@ func _initialize() -> void:
 		wait_flag_after_ok = client.is_waiting_for_next_pi
 		sig_log.append(["game_finish_ok"]))
 	client.player_incoming.connect(func(u, d):
-		snap_incoming = client.current_player.duplicate(true)
+		if snap_incoming.is_empty():
+			snap_incoming = client.current_player.duplicate(true)
+		ok_log.append(_last_event().duplicate())
 		sig_log.append(["player_incoming", u, d]))
 	client.player_left.connect(func(u):
 		snap_left = client.current_player.duplicate(true)
+		ok_log.append(_last_event().duplicate())
 		sig_log.append(["player_left", u]))
 	client.server_error.connect(func(c, m, e): sig_log.append(["server_error", c, m, e]))
 
@@ -92,7 +96,7 @@ func _initialize() -> void:
 			deadline = 40.0
 			client.run()
 			client._retry_delay = 1
-		"events":
+		"events", "dedupe":
 			deadline = 20.0
 			client.run()
 		"giveup":
@@ -137,7 +141,7 @@ func _on_authenticated() -> void:
 				client.share("b", 3)
 				client.share("c", 4)
 				client.finish_game()
-		"events":
+		"events", "dedupe":
 			done_at = t + 1.5
 
 
@@ -161,6 +165,10 @@ func _process(delta: float) -> bool:
 			_tick_lost()
 		"giveup":
 			_tick_giveup()
+		"dedupe":
+			if sig_log.size() > 0 and not finish_sent:
+				finish_sent = true  # used here as "started"
+				client.start_game()
 	if done_at > 0.0 and t >= done_at:
 		_check_end()
 		return _finish()
@@ -204,6 +212,15 @@ func _tick_giveup() -> void:
 		done_at = t + 0.8
 
 
+# The last event that the client sent or queued (the ok is sent before the signal).
+func _last_event() -> Dictionary:
+	if not client.send_queue.is_empty():
+		return client.send_queue.back()
+	if not client.unacked.is_empty():
+		return client.unacked.back()
+	return {}
+
+
 func _no_pending() -> void:
 	check(client.send_queue.is_empty() and client.unacked.is_empty(),
 		"send_queue and unacked empty at the end (all events acked)")
@@ -234,12 +251,22 @@ func _check_end() -> void:
 			check(auth_count == 2, "authenticated emitted twice (got %d)" % auth_count)
 			_no_pending()
 		"events":
-			var exp_names := ["game_finish_wait", "game_finish_ok", "player_incoming", "player_left", "server_error"]
+			var exp_names := ["game_finish_wait", "game_finish_ok", "player_incoming", "player_left", "server_error", "player_incoming"]
 			var got_names := []
 			for s in sig_log:
 				got_names.append(s[0])
 			check(got_names == exp_names, "signal order %s" % [got_names])
-			if sig_log.size() == 5:
+			if ok_log.size() == 3:
+				check(ok_log[0].get("event") == "player_incoming_ok" and typeof(ok_log[0].get("id")) == TYPE_INT and ok_log[0].get("id") == 41,
+					"player_incoming_ok echoes id 41 as int (got %s)" % [ok_log[0]])
+				check(ok_log[1].get("event") == "player_left_ok" and typeof(ok_log[1].get("id")) == TYPE_INT and ok_log[1].get("id") == 42,
+					"player_left_ok echoes id 42 as int (got %s)" % [ok_log[1]])
+				check(ok_log[2].get("event") == "player_incoming_ok" and not ok_log[2].has("id"),
+					"player_incoming_ok has no id when the message has no id (got %s)" % [ok_log[2]])
+			else:
+				check(false, "3 oks queued (got %d)" % ok_log.size())
+			if sig_log.size() == 6:
+				check(sig_log[5][1] == "bob", "player_incoming without id: username = bob")
 				check(sig_log[0][1] == "10 min", "game_finish_wait max_wait = '10 min'")
 				check(sig_log[2][1] == "alice", "player_incoming username = alice")
 				check(sig_log[2][2] is Dictionary and sig_log[2][2].get("score") == 3, "player_incoming player_data = {score: 3}")
@@ -251,6 +278,14 @@ func _check_end() -> void:
 			check(snap_incoming.get("username") == "alice" and snap_incoming.get("data") is Dictionary, "current_player set on player_incoming")
 			check(snap_left is Dictionary and snap_left.is_empty(), "current_player cleared on player_left")
 			check(client._state == 3, "client still CONNECTED after junk/unknown packets")
+		"dedupe":
+			var got := []
+			for s in sig_log:
+				got.append(s.slice(0, 2))
+			var want := [["player_incoming", "alice"], ["game_finish_ok"], ["player_left", "alice"], ["player_incoming", "bob"]]
+			check(got == want, "one signal per message, none for another player (got %s)" % [got])
+			check(client.current_player.get("username") == "bob", "current player is bob at the end")
+			_no_pending()
 		"giveup":
 			check(gave_up_count == 1, "gave_up emitted exactly once (got %d)" % gave_up_count)
 			check(auth_count == 0, "authenticated never emitted")

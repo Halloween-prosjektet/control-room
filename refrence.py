@@ -6,6 +6,24 @@ from datetime import datetime, timezone
 import websockets as ws
 
 
+SEEN_MAX = 200  # Antall meldings-id-er klienten husker (for å kjenne igjen kopier)
+
+
+def has_id(data):
+    msg_id = data.get("id")
+    return isinstance(msg_id, (int, float)) and not isinstance(msg_id, bool)
+
+
+def ok_with_id(event, data):
+    # Svaret på player_incoming / player_left / game_finish_ok. Hvis meldingen har
+    # "id", sendes den samme "id" tilbake, slik at serveren bare fjerner akkurat den
+    # meldingen.
+    payload = {"event": event}
+    if has_id(data):
+        payload["id"] = int(data["id"])
+    return payload
+
+
 class Client:
     def __init__(self) -> None:
         self.uri = "0.0.0.0:443"  # Eksempel uri
@@ -21,6 +39,10 @@ class Client:
         self.unacked = deque()  # sendt, men serveren har ikke svart med "ack" ennå
 
         self._next_seq = 1
+        # Meldinger fra serveren som klienten allerede har handlet på
+        # ("hendelse:id:brukernavn"). Serveren sender en melding på nytt til den får
+        # svar, så samme melding kan komme flere ganger.
+        self._seen = deque(maxlen=SEEN_MAX)
         self._send_lock = asyncio.Lock()  # holder rekkefølgen når flere tasks sender
 
     def _get_timestamp(self):
@@ -74,7 +96,10 @@ class Client:
 
         for attempt in range(1, 4):
             # auth går rett ut (aldri i køen), og feil ignoreres
-            await self._send_raw({"event": "auth", "pi": self.pi_id})
+            # "features": klienten svarer game_finish_ack på game_finish_ok
+            await self._send_raw(
+                {"event": "auth", "pi": self.pi_id, "features": ["game_finish_ack"]}
+            )
             try:
                 message = await asyncio.wait_for(self.websocket.recv(), 5)
 
@@ -100,39 +125,70 @@ class Client:
             }
         )
 
+    def _current_username(self) -> str:
+        username = self.current_player.get("username")
+        return username.strip() if isinstance(username, str) else ""
+
+    def _with_username(self, payload):
+        # Legger til brukernavnet til nåværende spiller (hvis kjent), slik at
+        # serveren kan sjekke at hendelsen gjelder riktig spiller.
+        username = self._current_username()
+        if username:
+            payload["username"] = username
+        return payload
+
+    def _first_copy(self, data) -> bool:
+        # Sann første gang en melding med denne id-en kommer. En melding uten id er
+        # alltid ny.
+        if not has_id(data):
+            return True
+        key = f"{data.get('event', '')}:{int(data['id'])}:{data.get('username', '')}"
+        if key in self._seen:
+            return False
+        self._seen.append(key)
+        return True
+
     async def leave_player(self):
         await self.send_event(
-            {
-                "event": "player_leave",
-            }
+            self._with_username(
+                {
+                    "event": "player_leave",
+                }
+            )
         )
         self.current_player = {}
 
     async def start_game(self):
         await self.send_event(
-            {
-                "event": "game_start",
-                "timestamp": self._get_timestamp(),
-            }
+            self._with_username(
+                {
+                    "event": "game_start",
+                    "timestamp": self._get_timestamp(),
+                }
+            )
         )
 
     async def finish_game(self):
         await self.send_event(
-            {
-                "event": "game_finish",
-                "timestamp": self._get_timestamp(),
-            }
+            self._with_username(
+                {
+                    "event": "game_finish",
+                    "timestamp": self._get_timestamp(),
+                }
+            )
         )
 
     async def share(self, key, value, pi: int | list[int] | None = None):
         await self.send_event(
-            {
-                "event": "share",
-                "key": key,
-                "value": value,
-                "pi": pi,
-                "timestamp": self._get_timestamp(),
-            }
+            self._with_username(
+                {
+                    "event": "share",
+                    "key": key,
+                    "value": value,
+                    "pi": pi,
+                    "timestamp": self._get_timestamp(),
+                }
+            )
         )
 
     # Hooks: overstyr i en subklasse (tilsvarer signalene i Godot-klienten)
@@ -168,6 +224,20 @@ class Client:
                 self.is_waiting_for_next_pi = True
                 self.on_game_finish_wait(data.get("max_wait", ""))
             case "game_finish_ok":
+                # Svar med id, så serveren slutter å sende meldingen på nytt
+                if has_id(data):
+                    await self.send_event(ok_with_id("game_finish_ack", data))
+                # Ignorer en kopi, og en melding om en annen spiller enn den som vises
+                if not self._first_copy(data):
+                    return
+                finished_user = data.get("username")
+                current = self._current_username()
+                if (
+                    isinstance(finished_user, str)
+                    and current
+                    and finished_user.strip() != current
+                ):
+                    return
                 self.is_waiting_for_next_pi = False
                 self.on_game_finish_ok()
             case "error":
@@ -177,21 +247,22 @@ class Client:
                 # "event" er alltid "error"; hendelsen som feilet ligger i "event_name"
                 self.on_server_error(code, message, data.get("event_name", ""))
             case "player_left":
+                await self.send_event(ok_with_id("player_left_ok", data))
+                # Ignorer en kopi, og player_left for en annen spiller enn den som vises
+                if not self._first_copy(data):
+                    return
+                left_user = str(data.get("username", "")).strip()
+                if not left_user or left_user != self._current_username():
+                    return
                 self.current_player = {}
-                await self.send_event(
-                    {
-                        "event": "player_left_ok",
-                    }
-                )
                 self.on_player_left(data.get("username", ""))
             case "player_incoming":
+                await self.send_event(ok_with_id("player_incoming_ok", data))
+                # Ignorer en kopi av en melding som allerede er tatt imot
+                if not self._first_copy(data):
+                    return
                 self.current_player["username"] = data.get("username")
                 self.current_player["data"] = data.get("player_data", None)
-                await self.send_event(
-                    {
-                        "event": "player_incoming_ok",
-                    }
-                )
                 self.on_player_incoming(
                     data.get("username", ""), data.get("player_data", None)
                 )

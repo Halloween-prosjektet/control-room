@@ -16,6 +16,7 @@ SCENARIOS=(
   "drop   18705 60 d_connection_dropped_reconnect"
   "lost_after_send 18707 60 g_event_not_acked_then_connection_killed_resend"
   "events 18706 40 e_server_events_and_acks"
+  "dedupe 18708 40 h_copies_and_other_players_ignored"
   "giveup 18799 70 f_ten_failed_connects_gave_up"
 )
 

@@ -171,19 +171,22 @@ The repair in the shipped code removes all three.
 - The server in the TLA+ model is an abstraction of the rules below (dedupe and cumulative ack). The real server code is not checked here.
 - `model_check.py` has bounds that only the mutants reach: `AUTH_Q_CAP=1` (auth messages in the queue, mutant `auth_queued`), `INBOX_CAP=6` (acks in the inbox), and a cut-off of states with more than 2N events in `send_queue` and `unacked` (mutant `unacked_early`). The baseline never reaches them, so the state counts equal the TLC counts.
 - Liveness in the lossy environment is not claimed: a hostile network can prevent CONNECTED. The claim is only for the cooperative environment and for the fair-lossy environment of `ControlRoomClientRecover.cfg` (a bounded number of drops).
-- Parsing of JSON and `event_handler` content are not modelled, except that `player_incoming` causes one acknowledgement event and `ack` calls `_handle_ack`.
+- Parsing of JSON and `event_handler` content are not modelled, except that `player_incoming` causes one acknowledgement event and `ack` calls `_handle_ack`. The client also sends one reply event for each copy of `player_left` and of `game_finish_ok` with an `id`. These replies are app events of the same kind as the `player_incoming_ok` in the model. The rules that ignore a copy or a message for another player (F6) are not modelled. The e2e scenario `dedupe` tests them.
 
 ## End-to-end test (e2e)
 
-`e2e/run.sh` runs 8 scenarios with the real GDScript client (godot, headless)
+`e2e/run.sh` runs 9 scenarios with the real GDScript client (godot, headless)
 against `e2e/fake_server.ts` (bun). In all scenarios the fake server follows the
 rules below: it acks (cumulative) and drops a duplicate seq (per Pi, across
 connections). A check for all scenarios: the accepted seq values are exactly 1..n
 in order, so there is no loss, no duplicate and no reorder after the dedupe.
 
 - `normal`, `early`, `auth2`, `auth3`, `events`, `giveup`: as before (the client also ends with an empty `send_queue` and `unacked` where the server acks).
+- `events`: the client sends `player_incoming_ok` and `player_left_ok` with the `id` of the message (as an integer). For a `player_incoming` with no `id`, the ok has no `id`.
 - `drop`: the server kills the connection in a stream of 150 events. After the reconnect there is no loss, no duplicate after dedupe, and the order is kept.
 - `lost_after_send`: the server reads the event `target`, does not ack it, and kills the connection. The client sends it again after the reconnect. The server sees the known seq, drops it as a duplicate and acks.
+- `normal` also checks that `auth` has `features: ["game_finish_ack"]`, and that `game_start`, `share` and `game_finish` have the `username` of the current player.
+- `dedupe`: the server sends copies of `player_incoming`, `player_left` and `game_finish_ok`, a `player_left` and a `game_finish_ok` for another player, and then a new player. The client replies to each message (also each copy) with the `id`. It emits one signal for each message and no signal for another player.
 
 ## Protocol additions the server must implement
 
@@ -196,5 +199,10 @@ has the same rules in the protocol.
 4. The server must process the events of one Pi in `seq` order. The client sends them in order, also on resend, so a server that reads each connection in order does this.
 5. `auth`: the client sends `{"event": "auth", "pi": n}` without a `seq`, and it does not send it again from a queue. The server answers `auth_ok`. The client sends no app event before `auth_ok`. After `auth_ok`, it sends the unacked events again.
 6. `error.event_name`: an `error` message has `"event": "error"`. The name of the event that failed is in `event_name`, not in `event`. The client reads `event_name` and gives it to the signal `server_error(code, message, event)`.
-7. Seq reset: if a game process restarts, the client counter starts again at 1. The server needs a way to know this (for example a new session id, or a reset when the Pi is idle). The current rules have no such way: see "Other observations".
+7. Seq reset: if a game process restarts, the client counter starts again at 1. The server needs a way to know this (for example a new session id, or a reset when the Pi is idle). The current rules have no such way: see "Other observations". (The backend uses the `session` field of `auth`, see `backend/README.md`.)
+8. `id` in server messages: `player_incoming`, `player_left` and `game_finish_ok` have an integer `id`. The server can send the same message more than one time. The client replies to each copy with the same `id` (`player_incoming_ok`, `player_left_ok`, `game_finish_ack`). The server removes only the message with that `id`.
+9. `features` in `auth`: the client sends `"features": ["game_finish_ack"]`. Then the server sends `game_finish_ok` again until it gets `game_finish_ack {id}` (finding F8 in `server/README.md`). For a client without this feature, the server sends `game_finish_ok` one time.
+10. `username` in Pi events: `game_start`, `game_finish`, `player_leave` and `share` have the `username` of the current player when the client knows it. The server applies the event only to the run with that username, else it replies `error` with code `wrong_player` (finding F2). The server still acks the `seq`.
+11. Copies and other players (finding F6): the client does the action of a message and emits its signal one time only for each message (same event, `id` and `username`; it keeps the last 200). It ignores `player_left` for another player than the current player. It ignores `game_finish_ok` for another player when it knows the current player. It still sends the reply.
 8. Old clients (no `seq`): the server processes each such event and sends no ack.
+9. `id` on `player_incoming` and `player_left`: the server puts a unique integer `id` (the outbox message id) in each `player_incoming` and `player_left`. The server can send the same message more than one time (after a reconnect, and by timer). The client sends one ok for each copy that it gets, with the same `id`. The server removes only the outbox message with that `id`. An ok for an unknown `id`, or for a message that the server removed before, has no effect (the server still acks its `seq`). Thus a late or duplicate ok cannot remove a newer message. An ok with no `id` (old client) removes the oldest open message of that event for the Pi.

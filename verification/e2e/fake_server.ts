@@ -99,6 +99,11 @@ const scenarios: Record<string, Scenario> = {
       if (!eq(all, want)) f.push(`order: got ${JSON.stringify(all)}, want ${JSON.stringify(want)}`);
       const a = ins()[0]?.msg;
       if (a?.pi !== 3) f.push(`auth pi: got ${JSON.stringify(a?.pi)}, want 3`);
+      if (!eq(a?.features, ["game_finish_ack"]))
+        f.push(`auth features: got ${JSON.stringify(a?.features)}, want ["game_finish_ack"]`);
+      // F2: the events after player_register carry the username of the current player.
+      for (const e of events().filter((x) => x.msg.event !== "player_register"))
+        if (e.msg.username !== "bob") f.push(`${e.msg.event} username: got ${JSON.stringify(e.msg.username)}, want "bob"`);
       const reg = events().find((e) => e.msg.event === "player_register")?.msg;
       if (reg?.username !== "bob") f.push(`username: got ${JSON.stringify(reg?.username)}`);
       const sh = events().find((e) => e.msg.event === "share")?.msg;
@@ -254,6 +259,43 @@ const scenarios: Record<string, Scenario> = {
     },
   },
 
+  // h) copies of a message and messages about another player (F6), game_finish_ack (F8)
+  dedupe: {
+    onMessage(ws, msg) {
+      if (msg.event !== "auth") return;
+      answerAuth(ws);
+      const steps: Msg[] = [
+        { event: "player_incoming", id: 51, username: "alice", player_data: { k: 1 } },
+        { event: "player_incoming", id: 51, username: "alice", player_data: { k: 1 } },
+        { event: "player_left", id: 52, username: "zed" },
+        { event: "game_finish_ok", id: 53, username: "alice" },
+        { event: "game_finish_ok", id: 53, username: "alice" },
+        { event: "game_finish_ok", id: 54, username: "zed" },
+        { event: "player_left", id: 55, username: "alice" },
+        { event: "player_left", id: 55, username: "alice" },
+        // After player_left the client has no player: a new player can come.
+        { event: "player_incoming", id: 56, username: "bob", player_data: {} },
+      ];
+      steps.forEach((m, i) => setTimeout(() => send(ws, m), 200 + i * 100));
+    },
+    verify(f) {
+      const got = events().map((e) => `${e.msg.event}:${e.msg.id ?? "-"}${e.msg.username ? `:${e.msg.username}` : ""}`);
+      const want = [
+        "player_incoming_ok:51",
+        "game_start:-:alice", // the client starts the player after the first player_incoming
+        "player_incoming_ok:51",
+        "player_left_ok:52",
+        "game_finish_ack:53",
+        "game_finish_ack:53",
+        "game_finish_ack:54",
+        "player_left_ok:55",
+        "player_left_ok:55",
+        "player_incoming_ok:56",
+      ];
+      if (!eq(got, want)) f.push(`client replies: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+    },
+  },
+
   // e) server-side events
   events: {
     onMessage(ws, msg) {
@@ -265,16 +307,24 @@ const scenarios: Record<string, Scenario> = {
         () => ws.send("[1,2]"),
         () => send(ws, { event: "mystery_event" }),
         () => send(ws, { event: "game_finish_ok" }),
-        () => send(ws, { event: "player_incoming", username: "alice", player_data: { score: 3 } }),
-        () => send(ws, { event: "player_left", username: "alice" }),
+        () =>
+          send(ws, { event: "player_incoming", id: 41, username: "alice", player_data: { score: 3 } }),
+        () => send(ws, { event: "player_left", id: 42, username: "alice" }),
         () => send(ws, { event: "error", code: "E1", message: "boom", event_name: "share" }),
+        // An older server sends no id: the ok has no id.
+        () => send(ws, { event: "player_incoming", username: "bob", player_data: {} }),
       ];
       steps.forEach((s, i) => setTimeout(s, 200 + i * 100));
     },
     verify(f) {
       const got = names(events());
-      const want = ["player_incoming_ok", "player_left_ok"];
+      const want = ["player_incoming_ok", "player_left_ok", "player_incoming_ok"];
       if (!eq(got, want)) f.push(`client acks: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+      // The ok echoes the id of the message (as an integer), and has no id when the message has none.
+      const ids = events().map((e) => ("id" in e.msg ? e.msg.id : "none"));
+      if (!eq(ids, [41, 42, "none"])) f.push(`echoed ids: got ${JSON.stringify(ids)}, want [41,42,"none"]`);
+      const raw = log.filter((e) => e.dir === "in" && "id" in e.msg).map((e) => e.msg.id);
+      if (!raw.every((x) => Number.isInteger(x))) f.push(`echoed id is not an integer: ${JSON.stringify(raw)}`);
     },
   },
 };
