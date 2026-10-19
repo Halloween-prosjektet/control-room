@@ -1,0 +1,4 @@
+[submodule "testgame/addons/control_room_client"]
+	path = testgame/addons/control_room_client
+	url = https://github.com/halloween-prosjektet/control-room.git
+	branch = addon
