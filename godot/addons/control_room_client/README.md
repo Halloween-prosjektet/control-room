@@ -6,18 +6,41 @@ beskjeder til de andre rommene. Krever Godot 4.
 
 ## 1. Legg til tillegget
 
-1. Last ned prosjektet som ZIP fra GitHub og pakk det ut.
-2. Kopier mappen `godot/addons/control_room_client` inn i `addons`-mappen i
-   Godot-prosjektet ditt. Lag `addons` hvis den ikke finnes.
-
-Det er alt. Du trenger ikke slå på noe under *Project Settings → Plugins*.
-
-Bruker du git? Da kan du heller kjøre dette i prosjektmappen, så får du
-oppdateringer enkelt:
+Alle grupper bruker git. Åpne en terminal i mappen til Godot-prosjektet ditt
+(der `project.godot` ligger) og kjør:
 
 ```sh
 git submodule add -b addon https://github.com/halloween-prosjektet/control-room.git addons/control_room_client
+git commit -m "Legg til control room client"
 ```
+
+Oppdater senere med:
+
+```sh
+git submodule update --remote addons/control_room_client
+```
+
+Du trenger ikke slå på noe under *Project Settings → Plugins*.
+
+Får du ikke til git? Last ned prosjektet som ZIP, og kopier mappen
+`godot/addons/control_room_client` inn i `addons`-mappen i prosjektet ditt.
+
+### Har dere ikke et repo ennå?
+
+Lag et tomt repo i organisasjonen *halloween-prosjektet* på GitHub (knappen
+*New repository*, uten README). Kjør så dette i prosjektmappen:
+
+```sh
+git init
+git add .
+git commit -m "Første commit"
+git branch -M main
+git remote add origin https://github.com/halloween-prosjektet/REPO-NAVN.git
+git push -u origin main
+```
+
+Bytt ut `REPO-NAVN` med navnet på repoet deres. Gjør dette **før** du
+legger til tillegget.
 
 ## 2. Koble til
 
