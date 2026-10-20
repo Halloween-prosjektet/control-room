@@ -1,0 +1,438 @@
+/* Layout: pumpkin-framed leaderboard on the left, five live room cards (U1-U5) stacked on the right; brick strip at the foot.
+   Tokens are the "Kjeller" theme of the Halloween-prosjektet design system. Single dark look by choice: it runs in a dark hall. */
+:root {
+  color-scheme: dark;
+  --bg-000: #0c0013;
+  --bg-100: #201325;
+  --bg-200: #2b1a33;
+  --frame: #512f5d;
+  --frame-hi: #8a5a9c;
+  --ink: #f3ecdf;
+  --ink-muted: #b6ba9e;
+  --pumpkin: #ff8400;
+  --pumpkin-text: #ff9a2e;
+  --on-pumpkin: #1d0d04;
+  --poster-red: #df4624;
+  --potion: #38f17d;
+  --key-gold: #ffc20e;
+  --danger: #ff6b5e;
+  --steel: #9a9a9a;
+  --font-display: Anton, Impact, "Arial Narrow", sans-serif;
+  --font-pixel: "Pixelify Sans", ui-monospace, monospace;
+  --font-sign: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  /* where the frame's purple edge line sits inside the frame box at 1x (the pumpkins stick out past it) */
+  --edge-t: 20px;
+  --edge-r: 22px;
+  --edge-b: 2px;
+  --edge-l: 4px;
+  /* scale everything from one size: portrait 1080x1920 gives ~24px, a phone 15px */
+  font-size: clamp(15px, min(2.2vw, 1.6vh), 40px);
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg-000);
+  color: var(--ink);
+  font-family: var(--font-pixel);
+  font-size: 1rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: none;
+}
+img {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.app {
+  position: relative;
+  z-index: 1;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- shader layers (WebGL). Back: moon, fog and embers behind the panels. Front: ground fog, vignette, bats. ---------- */
+.fx {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  image-rendering: pixelated;
+}
+.fx--back {
+  z-index: 0;
+}
+.fx--front {
+  z-index: 2;
+}
+.wrap {
+  box-sizing: border-box;
+  width: 100%;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+
+/* the page name, for screen readers only */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.status {
+  position: fixed;
+  z-index: 3;
+  left: max(16px, env(safe-area-inset-left, 0px));
+  bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px));
+  padding: 0.3rem 0.5rem;
+  background: var(--bg-000);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+}
+.status::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  background: currentColor;
+}
+.status[data-mode="live"] {
+  display: none;
+}
+.status[data-mode="demo"] {
+  color: var(--key-gold);
+}
+.status[data-mode="lost"] {
+  color: var(--danger);
+}
+
+/* ---------- main grid ---------- */
+.main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+  gap: 1rem;
+  padding-block: 1rem;
+  min-height: 0;
+}
+
+/* ---------- leaderboard in the pumpkin frame (1x; 2x on very wide screens) ---------- */
+.board {
+  box-sizing: border-box;
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-style: solid;
+  border-width: 50px 64px 10px 30px;
+  border-image: url("./assets/frame-pumpkin.png") 50 64 10 30 fill round;
+  image-rendering: pixelated;
+  padding-bottom: 8px;
+}
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  flex: 1;
+  min-height: 0;
+}
+.row {
+  display: grid;
+  grid-template-columns: 2.4rem minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.6rem 0.5rem;
+  box-shadow: inset 0 -2px 0 var(--bg-200);
+}
+.row[hidden] {
+  display: none;
+}
+/* rank: plain pixel number; the top three get a square badge like the room chips (gold, silver, bronze) */
+.rank {
+  box-sizing: border-box;
+  width: 2.4rem;
+  height: 2.4rem;
+  display: grid;
+  place-items: center;
+  font-size: 1.15rem;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--ink-muted);
+}
+.row--1 .rank,
+.row--2 .rank,
+.row--3 .rank {
+  color: var(--bg-000);
+  box-shadow: 4px 4px 0 var(--bg-000);
+}
+.row--1 .rank {
+  background: var(--key-gold);
+}
+.row--2 .rank {
+  background: var(--steel);
+}
+.row--3 .rank {
+  background: var(--pumpkin);
+}
+.name {
+  min-width: 0;
+  font-size: 1.2rem;
+  line-height: 1.2;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.time {
+  font-size: 1.3rem;
+  line-height: 1;
+  font-weight: 700;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.row--1 .name {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+.row--1 .time {
+  font-size: 1.7rem;
+  color: var(--key-gold);
+}
+.row--new {
+  animation: flash 0.5s steps(2, start) 6;
+}
+.empty {
+  padding: 1.5rem 0.5rem;
+  color: var(--ink-muted);
+  font-size: 1rem;
+}
+
+/* ---------- live rooms ---------- */
+/* the room column lines up with the leaderboard's edge line, not with the frame box */
+.rooms {
+  display: grid;
+  grid-template-rows: repeat(5, minmax(0, 1fr));
+  gap: 1rem;
+  min-height: 0;
+  min-width: 0;
+  padding-block: var(--edge-t) var(--edge-b);
+  margin-left: calc(-1 * var(--edge-r));
+}
+/* room card: the frame's purple edge line (4px) with its dark outline, no pumpkins */
+.room {
+  box-sizing: border-box;
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-100);
+  box-shadow:
+    0 0 0 1px var(--bg-000),
+    inset 0 0 0 4px var(--frame);
+  padding: 1rem 1.25rem;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  column-gap: 1rem;
+  row-gap: 0.3rem;
+  align-content: safe center;
+}
+.sign {
+  grid-row: 1 / 4;
+  align-self: start;
+  width: 2.6rem;
+  font-size: 1.6rem;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--ink);
+}
+.chip {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.65rem;
+  line-height: 1;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.3rem 0.45rem;
+  background: var(--bg-200);
+  color: var(--ink-muted);
+}
+.room[data-state="playing"] .chip {
+  background: var(--potion);
+  color: var(--bg-000);
+}
+.room[data-state="playing"] .chip::before {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  background: currentColor;
+  animation: blink 1s steps(2, start) infinite;
+}
+.room[data-state="incoming"] .chip {
+  background: var(--key-gold);
+  color: var(--bg-000);
+}
+.room[data-state="waiting"] .chip {
+  background: var(--frame);
+  color: var(--ink);
+}
+.room__name {
+  font-size: 1.4rem;
+  line-height: 1.2;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clock {
+  font-size: 3.4rem;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--ink);
+  align-self: start;
+}
+.clock span {
+  display: inline-block;
+  width: 0.62em;
+  text-align: center;
+}
+.clock span.sep {
+  width: 0.3em;
+}
+.room[data-state="playing"] .clock {
+  color: var(--potion);
+}
+
+/* ---------- footer ---------- */
+.foot {
+  flex: none;
+}
+.foot__wall {
+  height: 40px;
+  background: url("./assets/vegg-murstein.jpg") repeat-x 0 0 / 128px 80px;
+  image-rendering: pixelated;
+  box-shadow: inset 0 4px 0 var(--frame);
+}
+.foot__line {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+  padding-block: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--ink-muted);
+  background: var(--bg-000);
+}
+.foot__line strong {
+  color: var(--pumpkin-text);
+  font-weight: 600;
+}
+
+@keyframes blink {
+  to {
+    visibility: hidden;
+  }
+}
+@keyframes flash {
+  to {
+    background: var(--frame-hi);
+    color: var(--ink);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .status::before,
+  .chip::before,
+  .row--new {
+    animation: none !important;
+  }
+  .row--new {
+    box-shadow: inset 0 0 0 4px var(--key-gold);
+  }
+}
+
+/* one screen, no scroll: tablets, PCs and the hall display */
+@media (min-width: 760px) {
+  .app {
+    height: 100%;
+  }
+}
+/* wide hall screens (4K): the frame at 2x keeps its pixels square */
+@media (min-width: 1600px) {
+  :root {
+    --edge-t: 40px;
+    --edge-r: 44px;
+    --edge-b: 4px;
+    --edge-l: 8px;
+  }
+  .board {
+    border-width: 100px 128px 20px 60px;
+    padding-bottom: 16px;
+  }
+}
+/* phones: the list first, then the rooms as compact cards; the page scrolls */
+@media (max-width: 759px) {
+  .main {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+  .list {
+    overflow: visible;
+  }
+  .rooms {
+    grid-template-rows: none;
+    gap: 0.75rem;
+    padding-block: 0;
+    margin: 0 var(--edge-r) 0 var(--edge-l);
+  }
+  .sign {
+    font-size: 1.35rem;
+  }
+  .clock {
+    font-size: 1.6rem;
+  }
+}
+@media (max-width: 420px) {
+  .board {
+    border-width: 50px 40px 10px 22px;
+    border-image-slice: 50 40 10 22 fill;
+  }
+}
+
+/* the hall: no cursor */
+.kiosk,
+.kiosk * {
+  cursor: none;
+}
+
+/* ---------- error page ---------- */
+.error {
+  padding-block: 4rem;
+}
+.error h1 {
+  margin: 0 0 1rem;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 3rem;
+  color: var(--pumpkin);
+}
+.error pre {
+  overflow-x: auto;
+  font-size: 0.7rem;
+  color: var(--ink-muted);
+}
