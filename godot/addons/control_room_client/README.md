@@ -4,6 +4,11 @@ Med denne Godot-tillegget kan spillet ditt snakke med kontrollrommet:
 registrere spilleren, si fra når spillet starter og slutter, og sende
 beskjeder til de andre rommene. Krever Godot 4.
 
+> **Viktig:** Pi-en må være koblet til WiFi-et **BakkaIM**. Ellers kommer den
+> ikke fram til serveren.
+>
+> WebSocket-adressen (ws-url) er: `ws://172.31.0.200:7321`
+
 ## 1. Legg til tillegget
 
 Alle grupper bruker git. Åpne en terminal i mappen til Godot-prosjektet ditt
@@ -43,13 +48,13 @@ var client: ControlRoomClient
 
 
 func _ready() -> void:
-	# Adressen får du av kontrollrom-gruppen. Rom nummer er 1 til 5.
-	client = ControlRoomClient.new("ws://ADRESSE:PORT", 1)
+	# Rom nummer er 1 til 5.
+	client = ControlRoomClient.new("ws://172.31.0.200:7321", 1)
 	add_child(client)
 	client.run()
 ```
 
-Bytt ut `ADRESSE:PORT` med serveradressen, og `1` med rommet ditt.
+Bytt ut `1` med rommet ditt.
 Klienten kobler til selv, og kobler til på nytt hvis nettet faller ut.
 
 ## 3. Si fra til kontrollrommet
