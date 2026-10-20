@@ -13,7 +13,18 @@ git submodule update --init
 cd ../backend && bun start        # in a second terminal
 ```
 
-Open `testgame/` in Godot 4.4 or newer and run it. Use the server address
+Import the project once, then open it in Godot 4.4 or newer:
+
+```sh
+cd testgame
+godot --headless --path . --import   # builds the class cache (first time only)
+godot .
+```
+
+Without the import step, Godot cannot find `Tile` and other `class_name`
+scripts, and the game does not start.
+
+Run the game. Use the server address
 `ws://127.0.0.1:7321` (the default), then press **Connect all**.
 Use `127.0.0.1`, not `localhost`: the server listens on IPv4 only.
 
