@@ -98,6 +98,59 @@ func _on_player_incoming(username: String, player_data: Variant) -> void:
 	print("Velkommen, ", username)
 ```
 
+## Ventskjerm (valgfritt)
+
+Vil du at spillet skal stå stille til en spiller står i kø for Pi-en din? Legg
+til én linje etter `add_child(client)`:
+
+```gdscript
+client = ControlRoomClient.new("ws://172.31.0.200:7321", 3)
+add_child(client)
+client.add_loading_screen()
+client.run()
+```
+
+Da skjer dette av seg selv:
+
+1. Ingen i kø: spillet står på pause, og skjermen sier «Venter på spiller …».
+2. Spiller i kø: skjermen sier «Velkommen, Navn! Trykk på en knapp for å starte».
+3. Spilleren trykker på en tast, museknapp, kontrollerknapp eller skjermen:
+   spillet starter, og `client.start_game()` kalles for deg.
+4. Spilleren er ferdig (`game_finish_ok`) eller går (`player_left`): spillscenen
+   lastes på nytt, og skjermen venter på neste spiller.
+
+Du trenger ikke kalle `start_game()` selv.
+
+**Rom 1** har ingen kø. Der viser skjermen «Trykk på en knapp» med en gang, og
+`start_game()` kalles ikke. Du må selv kalle `register_player()` og så
+`start_game()`, som vanlig. Vil du bestemme når skjermen er klar, kall
+`screen.set_ready("Navn")`.
+
+`add_loading_screen()` gir deg skjermen tilbake:
+
+```gdscript
+var screen := client.add_loading_screen()
+screen.idle_text = "Ingen i kø"          # tekst uten kø
+screen.ready_text = "Hei, {name}!"       # {name} blir brukernavnet
+screen.press_text = "Trykk for å spille"
+screen.reload_scene_on_finish = false    # ikke last scenen på nytt
+screen.started.connect(func() -> void: print("spiller i gang"))
+screen.finished.connect(func() -> void: print("spiller ferdig"))
+```
+
+**Eget utseende:** lag en scene der rot-noden har et skript med
+`extends ControlRoomLoadingScreen`. Overstyr `_show_idle()` og
+`_show_ready(username)`, og send scenen inn:
+
+```gdscript
+client.add_loading_screen(preload("res://min_ventskjerm.tscn"))
+```
+
+**Pause:** som standard settes hele spillet på pause (`get_tree().paused`).
+Noder med `process_mode = Always` stopper ikke. Vil du bare stoppe en del av
+scenen, send inn den noden: `client.add_loading_screen(null, $Spill)`.
+Da laster ikke skjermen scenen på nytt. Bruk `finished` til å nullstille selv.
+
 ## Prøv det
 
 Åpne `godot/example/main.tscn` og kjør scenen. Endre adresse og rom nummer

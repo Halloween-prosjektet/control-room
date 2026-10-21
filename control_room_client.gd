@@ -75,6 +75,22 @@ func send_event(payload: Dictionary) -> void:
 	send_queue.append(payload)
 
 
+# Legger til en ventskjerm som holder spillet på pause til en spiller står i kø.
+# Kall etter add_child(client). "scene" er en egen ventskjerm (valgfri).
+# "target" er noden som settes på pause (valgfri, ellers hele spillet).
+func add_loading_screen(scene: PackedScene = null, target: Node = null) -> ControlRoomLoadingScreen:
+	var parent := get_parent()
+	if parent == null:
+		push_error("add_loading_screen() må kalles etter add_child(client).")
+		return null
+	var screen: ControlRoomLoadingScreen = \
+			scene.instantiate() if scene != null else ControlRoomLoadingScreen.new()
+	screen.target = target
+	parent.add_child(screen)
+	screen.bind(self)
+	return screen
+
+
 func _send_raw(payload: Dictionary) -> bool:
 	if websocket == null or websocket.get_ready_state() != WebSocketPeer.STATE_OPEN:
 		return false
