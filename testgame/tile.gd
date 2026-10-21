@@ -27,6 +27,7 @@ var _last_message: Label
 var _log: RichTextLabel
 var _game_holder: Control
 var _gave_up := false
+var _loading_screen: Node
 
 
 func _init(p_room: int, p_game_scene: PackedScene) -> void:
@@ -135,14 +136,28 @@ func connect_to(p_uri: String) -> void:
 	client.server_error.connect(func(code: String, message: String, event: String) -> void:
 		_message("server_error %s: %s (%s)" % [code, message, event], BAD))
 	game.attach(client, room)
+	_add_loading_screen()
 	_say("connecting to %s" % uri, DIM)
 	client.run()
+
+
+## Puts the loading screen over the game only (not over the whole window).
+## An older addon version has no add_loading_screen(), so check first.
+func _add_loading_screen() -> void:
+	if not client.has_method("add_loading_screen"):
+		return
+	_loading_screen = client.call("add_loading_screen", null, game)
+	_loading_screen.reparent(_game_holder, false)
 
 
 func disconnect_client() -> void:
 	if client == null:
 		return
 	game.detach()
+	if _loading_screen != null:
+		game.process_mode = Node.PROCESS_MODE_INHERIT  # The screen may have stopped the game
+		_loading_screen.queue_free()
+		_loading_screen = null
 	client.queue_free()
 	client = null
 	_say("disconnected", DIM)
