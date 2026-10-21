@@ -49,3 +49,12 @@ The buttons on each computer and the console commands run the same code.
 `RoomGame` gives your scene `client` and `room`. Use `_on_attach()` to connect
 to client signals, and `run_action()` for client calls (it also logs them).
 `games/default_game.gd` is a full example.
+
+## Loading screen
+
+When the addon has `add_loading_screen()`, each computer gets a loading screen
+over its game. The game stops until a player is queued (`player_incoming`).
+Then any key or mouse click starts it and calls `start_game()`. To try it:
+connect, then send a queued player with the server tools, press a key on the
+computer, and check that `start_game` arrives. Update the addon submodule first
+(`git submodule update --remote addons/control_room_client`).
