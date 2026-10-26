@@ -13,6 +13,7 @@ describe("config", () => {
         DB_PATH: "/tmp/x.sqlite",
         LOG_FILE: "/tmp/x.log",
         ACK_RETRY_MS: "500",
+        WS_IDLE_TIMEOUT_S: "60",
         DEFAULT_ROOM_MS: "60000",
         TZ_NAME: "UTC",
       }),
@@ -22,6 +23,7 @@ describe("config", () => {
       dbPath: "/tmp/x.sqlite",
       logFile: "/tmp/x.log",
       ackRetryMs: 500,
+      wsIdleTimeoutS: 60,
       defaultRoomMs: 60000,
       tzName: "UTC",
     });
@@ -34,6 +36,7 @@ describe("config", () => {
     expect(() => loadConfig({ PORT: "abc" })).toThrow("PORT");
     expect(() => loadConfig({ PORT: "70000" })).toThrow("PORT");
     expect(() => loadConfig({ ACK_RETRY_MS: "1.5" })).toThrow("ACK_RETRY_MS");
+    expect(() => loadConfig({ WS_IDLE_TIMEOUT_S: "5" })).toThrow("WS_IDLE_TIMEOUT_S");
     expect(() => loadConfig({ TZ_NAME: "Mars/Olympus" })).toThrow("TZ_NAME");
   });
 });

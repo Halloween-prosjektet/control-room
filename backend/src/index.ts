@@ -180,6 +180,7 @@ export function startServer(config: Config, options: ServerOptions = {}): Runnin
       );
     },
     websocket: {
+      idleTimeout: config.wsIdleTimeoutS,
       open: (ws) => {
         if (!stopped) room.connections.open(ws);
       },

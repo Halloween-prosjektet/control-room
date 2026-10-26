@@ -32,6 +32,8 @@ export interface ConnData {
   buffer: string[];
   /** True when the server closed this connection itself (replaced or bad auth). */
   closedByServer: boolean;
+  /** Epoch ms of the upgrade (for the lifetime in the close log). */
+  openedAt: number;
 }
 
 export type Socket = ServerWebSocket<ConnData>;
@@ -47,7 +49,7 @@ export interface ConnectionHandlers {
 let nextConnId = 1;
 
 export function newConnData(): ConnData {
-  return { id: nextConnId++, pi: null, buffer: [], closedByServer: false };
+  return { id: nextConnId++, pi: null, buffer: [], closedByServer: false, openedAt: Date.now() };
 }
 
 export class Connections {
@@ -56,7 +58,7 @@ export class Connections {
   constructor(private readonly handlers: ConnectionHandlers) {}
 
   open(ws: Socket): void {
-    this.handlers.log("info", `connection ${ws.data.id} open`);
+    this.handlers.log("info", `connection ${ws.data.id} open from ${ws.remoteAddress}`);
   }
 
   message(ws: Socket, raw: string | Buffer): void {
@@ -86,7 +88,10 @@ export class Connections {
     if (pi !== null && this.byPi.get(pi) === ws) this.byPi.delete(pi);
     this.handlers.log(
       "info",
-      `connection ${ws.data.id}${pi === null ? "" : ` (pi ${pi})`} closed: ${code} ${reason}`,
+      `connection ${ws.data.id}${pi === null ? "" : ` (pi ${pi})`} closed: ${code} ${reason}` +
+        ` (open ${Math.round((Date.now() - ws.data.openedAt) / 1000)} s, closed by ${
+          ws.data.closedByServer ? "server" : "client or network"
+        })`,
     );
   }
 
