@@ -77,6 +77,9 @@ export class ControlRoom {
   private readonly stepOptions: Partial<StepOptions>;
   private readonly log: Logger;
   private readonly now: () => number;
+  /** First time the expiry check saw each room in its current run and state. */
+  private readonly slotSince = new Map<number, { key: string; since: number }>();
+  private expiryTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * F8: Pis whose current client acks game_finish_ok (auth feature "game_finish_ack").
    * For the other Pis the server removes game_finish_ok after one send (old clients).
@@ -131,6 +134,59 @@ export class ControlRoom {
     }
     if (added.length > 0) this.outbox.deliver(added);
     return true;
+  }
+
+  /**
+   * Removes runs that block a room: a run `incoming` for too long (the player never
+   * arrived), or `playing` for too long (nobody ends the run). The time starts when this
+   * check first sees the run in that state, so after a restart each run gets a full
+   * timeout. A Pi can send player_leave at any time, as before.
+   */
+  expireStale(): void {
+    const now = this.now();
+    for (const slot of this.state.slots) {
+      if (slot.playerId === null || (slot.state !== "incoming" && slot.state !== "playing")) {
+        this.slotSince.delete(slot.room);
+        continue;
+      }
+      const key = `${slot.playerId}:${slot.state}`;
+      const seen = this.slotSince.get(slot.room);
+      if (seen === undefined || seen.key !== key) {
+        this.slotSince.set(slot.room, { key, since: now });
+        continue;
+      }
+      const limit =
+        slot.state === "incoming"
+          ? slot.room >= 2
+            ? this.config.incomingTimeoutMs
+            : 0
+          : this.config.playingTimeoutMs;
+      const age = now - seen.since;
+      if (limit > 0 && age >= limit) {
+        this.slotSince.delete(slot.room);
+        this.process({
+          type: "expire",
+          room: slot.room,
+          playerId: slot.playerId,
+          reason: `${slot.state} for ${Math.round(age / 1000)} s; limit ${Math.round(limit / 1000)} s`,
+        });
+      }
+    }
+  }
+
+  startExpiry(): void {
+    if (this.expiryTimer !== null) return;
+    const limits = [this.config.incomingTimeoutMs, this.config.playingTimeoutMs].filter(
+      (x) => x > 0,
+    );
+    if (limits.length === 0) return;
+    const every = Math.min(30_000, Math.max(10, Math.floor(Math.min(...limits) / 4)));
+    this.expiryTimer = setInterval(() => this.expireStale(), every);
+  }
+
+  stopExpiry(): void {
+    if (this.expiryTimer !== null) clearInterval(this.expiryTimer);
+    this.expiryTimer = null;
   }
 
   /** 8.1: a valid auth. Session rule, features, then auth_ok, then the outbox again. */
@@ -193,6 +249,7 @@ export function startServer(config: Config, options: ServerOptions = {}): Runnin
     },
   });
   room.outbox.start();
+  room.startExpiry();
 
   return {
     server,
@@ -202,6 +259,7 @@ export function startServer(config: Config, options: ServerOptions = {}): Runnin
       if (stopped) return;
       stopped = true;
       room.outbox.stop();
+      room.stopExpiry();
       room.connections.closeAll();
       await server.stop(true);
       db.close();

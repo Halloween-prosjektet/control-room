@@ -166,7 +166,13 @@ export type Input =
    */
   | { type: "outbox_sent"; ids: number[]; finishAckPis?: PiId[] }
   /** Operator action: forget the seq of a Pi (use after the Godot app restarts with seq 1). */
-  | { type: "reset_seq"; pi: PiId };
+  | { type: "reset_seq"; pi: PiId }
+  /**
+   * Operator timer: the run `playerId` has been in room `room` too long (a player that
+   * never arrived, or a room that nobody ends). The server removes it like player_leave.
+   * Nothing happens if the slot has another run or state now.
+   */
+  | { type: "expire"; room: PiId; playerId: string; reason: string };
 
 export type RunStatus = "active" | "completed" | "left";
 
@@ -245,6 +251,9 @@ export function step(
     case "reset_seq":
       ctx.pi(input.pi).lastSeq = 0;
       ctx.log("info", `seq of pi ${input.pi} reset`);
+      break;
+    case "expire":
+      ctx.onExpire(input.room, input.playerId, input.reason);
       break;
   }
   return ctx.finish(state);
@@ -681,14 +690,35 @@ class Ctx {
       this.send(pi, msg.playerLeaveOk());
       return;
     }
-    const { playerId, room } = found;
+    this.removeRun(found.playerId, found.room, pi);
+    this.send(pi, msg.playerLeaveOk());
+  }
+
+  /** The expiry timer: removes a run that stays in a room too long. */
+  onExpire(room: PiId, playerId: string, reason: string): void {
+    const slot = this.slot(room);
+    if (slot.playerId !== playerId || !this.s.runs[playerId]) return;
+    if (slot.state !== "incoming" && slot.state !== "playing") return;
+    this.removeRun(playerId, room, null, reason);
+  }
+
+  /**
+   * Removes an active run (status "left") from room `room`. `pi` is the Pi that sent
+   * player_leave, or null for the expiry timer. The Pi of the room gets player_left
+   * when the run was incoming and that Pi did not send the leave itself.
+   */
+  removeRun(playerId: string, room: PiId, pi: PiId | null, expired?: string): void {
     const run = this.run(playerId);
     const slot = this.slot(room);
     const wasIncoming = slot.state === "incoming";
 
     this.upsertRun(run, "left", null, null);
     delete this.s.runs[playerId];
-    this.log("info", `run ${playerId} left in room ${room} (${slot.state}), from pi ${pi}`);
+    if (pi === null) {
+      this.log("warn", `run ${playerId} expired in room ${room} (${slot.state}): ${expired}`);
+    } else {
+      this.log("info", `run ${playerId} left in room ${room} (${slot.state}), from pi ${pi}`);
+    }
 
     // A late player_incoming_ok from another Pi can still come for a sent message.
     this.dropIncoming(room, playerId, pi !== room);
@@ -699,10 +729,12 @@ class Ctx {
       }
     }
     // The Pi that sends player_leave does not need a pending game_finish_ok for this run.
-    for (const entry of this.s.outbox.filter(
-      (x) => x.pi === pi && x.event === "game_finish_ok" && x.playerId === playerId,
-    )) {
-      this.outboxRemove(entry.id);
+    if (pi !== null) {
+      for (const entry of this.s.outbox.filter(
+        (x) => x.pi === pi && x.event === "game_finish_ok" && x.playerId === playerId,
+      )) {
+        this.outboxRemove(entry.id);
+      }
     }
 
     slot.state = "empty";
@@ -710,7 +742,6 @@ class Ctx {
     slot.lastLeft = playerId;
     slot.notified = false;
     this.roomEmptied(room);
-    this.send(pi, msg.playerLeaveOk());
   }
 
   /** 8.8 */

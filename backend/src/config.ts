@@ -10,6 +10,10 @@ export interface Config {
   /** Seconds without any frame (also a pong) before Bun closes a WebSocket. */
   wsIdleTimeoutS: number;
   defaultRoomMs: number;
+  /** A run `incoming` in room 2 to 5 that sends no game_start for this long is removed. 0 = never. */
+  incomingTimeoutMs: number;
+  /** A run `playing` in a room for this long is removed. 0 = never. */
+  playingTimeoutMs: number;
   tzName: string;
 }
 
@@ -21,6 +25,8 @@ export const DEFAULT_CONFIG: Config = {
   ackRetryMs: 2000,
   wsIdleTimeoutS: 120,
   defaultRoomMs: 300_000,
+  incomingTimeoutMs: 900_000,
+  playingTimeoutMs: 10_800_000,
   tzName: "Europe/Oslo",
 };
 
@@ -67,6 +73,20 @@ export function loadConfig(env: Env = process.env): Config {
     ackRetryMs: intVar(env, "ACK_RETRY_MS", DEFAULT_CONFIG.ackRetryMs, 50, 3_600_000),
     wsIdleTimeoutS: intVar(env, "WS_IDLE_TIMEOUT_S", DEFAULT_CONFIG.wsIdleTimeoutS, 10, 960),
     defaultRoomMs: intVar(env, "DEFAULT_ROOM_MS", DEFAULT_CONFIG.defaultRoomMs, 1, 86_400_000),
+    incomingTimeoutMs: intVar(
+      env,
+      "INCOMING_TIMEOUT_MS",
+      DEFAULT_CONFIG.incomingTimeoutMs,
+      0,
+      86_400_000,
+    ),
+    playingTimeoutMs: intVar(
+      env,
+      "PLAYING_TIMEOUT_MS",
+      DEFAULT_CONFIG.playingTimeoutMs,
+      0,
+      86_400_000,
+    ),
     tzName,
   };
 }
