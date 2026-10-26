@@ -60,7 +60,18 @@ server does not start.
 | `ACK_RETRY_MS` | `2000` | Time between two sends of an outbox message. |
 | `WS_IDLE_TIMEOUT_S` | `120` | Seconds without a frame or pong before the server closes a WebSocket (10 to 960). |
 | `DEFAULT_ROOM_MS` | `300000` | Room time estimate when no run has completed the room. The server uses it for `max_wait`. |
+| `INCOMING_TIMEOUT_MS` | `900000` | A run that is `incoming` in room 2 to 5 and sends no `game_start` for this time is removed (status `left`). `0` = never. |
+| `PLAYING_TIMEOUT_MS` | `10800000` | A run that is `playing` in a room for this time is removed (status `left`). `0` = never. |
 | `TZ_NAME` | `Europe/Oslo` | Time zone for the timestamps that the server sends. |
+
+## Stale runs
+
+A run that never arrives, or that nobody ends, blocks the rooms behind it. A timer
+(`INCOMING_TIMEOUT_MS`, `PLAYING_TIMEOUT_MS`) removes such a run like `player_leave`:
+the run gets status `left`, the room is empty, the next waiting run moves in, and the Pi
+of an `incoming` room gets `player_left` (an existing message). The time starts when the
+server first sees the run in that state, so a restart gives each run a full timeout.
+Room 1 `incoming` (a registered player) never expires. Each expiry is logged as `WARN`.
 
 ## Delivery rules
 

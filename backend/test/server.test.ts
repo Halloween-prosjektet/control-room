@@ -32,6 +32,8 @@ function config(dbPath: string, ackRetryMs = 100): Config {
     ackRetryMs,
     wsIdleTimeoutS: 120,
     defaultRoomMs: 300_000,
+    incomingTimeoutMs: 0,
+    playingTimeoutMs: 0,
     tzName: "Europe/Oslo",
   };
 }

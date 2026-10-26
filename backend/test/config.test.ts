@@ -15,6 +15,8 @@ describe("config", () => {
         ACK_RETRY_MS: "500",
         WS_IDLE_TIMEOUT_S: "60",
         DEFAULT_ROOM_MS: "60000",
+        INCOMING_TIMEOUT_MS: "1000",
+        PLAYING_TIMEOUT_MS: "0",
         TZ_NAME: "UTC",
       }),
     ).toEqual({
@@ -25,6 +27,8 @@ describe("config", () => {
       ackRetryMs: 500,
       wsIdleTimeoutS: 60,
       defaultRoomMs: 60000,
+      incomingTimeoutMs: 1000,
+      playingTimeoutMs: 0,
       tzName: "UTC",
     });
   });
