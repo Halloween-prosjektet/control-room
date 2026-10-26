@@ -30,6 +30,7 @@ function config(dbPath: string, ackRetryMs = 100): Config {
     dbPath,
     logFile: null,
     ackRetryMs,
+    wsIdleTimeoutS: 120,
     defaultRoomMs: 300_000,
     tzName: "Europe/Oslo",
   };
@@ -590,6 +591,14 @@ describe("server", () => {
     await fresh.online();
     await waitUntil(() => old.closes.length === 1, "old closed");
     expect(old.closes[0]?.code).toBe(4000);
+    // The close log says who closed the connection, and where the client was.
+    await waitUntil(
+      () => env.logs.some((l) => /closed: 4000 .*closed by server\)/.test(l.message)),
+      "close log with the closer",
+    );
+    expect(env.logs.some((l) => /connection \d+ open from 127\.0\.0\.1/.test(l.message))).toBe(
+      true,
+    );
     env.pis[2] = fresh;
     expect(env.srv.room.connections.connectedPis()).toEqual([1, 2, 3, 4, 5]);
     // The new connection works for a full run.

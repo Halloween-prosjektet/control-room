@@ -58,6 +58,7 @@ server does not start.
 | `DB_PATH` | `./data/control-room.sqlite` | SQLite file. |
 | `LOG_FILE` | `./data/server.log` | File that gets a copy of each log line (appended). `off` = no file. |
 | `ACK_RETRY_MS` | `2000` | Time between two sends of an outbox message. |
+| `WS_IDLE_TIMEOUT_S` | `120` | Seconds without a frame or pong before the server closes a WebSocket (10 to 960). |
 | `DEFAULT_ROOM_MS` | `300000` | Room time estimate when no run has completed the room. The server uses it for `max_wait`. |
 | `TZ_NAME` | `Europe/Oslo` | Time zone for the timestamps that the server sends. |
 

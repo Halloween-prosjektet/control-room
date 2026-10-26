@@ -7,6 +7,8 @@ export interface Config {
   /** File that gets a copy of each log line. null = no file. */
   logFile: string | null;
   ackRetryMs: number;
+  /** Seconds without any frame (also a pong) before Bun closes a WebSocket. */
+  wsIdleTimeoutS: number;
   defaultRoomMs: number;
   tzName: string;
 }
@@ -17,6 +19,7 @@ export const DEFAULT_CONFIG: Config = {
   dbPath: "./data/control-room.sqlite",
   logFile: "./data/server.log",
   ackRetryMs: 2000,
+  wsIdleTimeoutS: 120,
   defaultRoomMs: 300_000,
   tzName: "Europe/Oslo",
 };
@@ -62,6 +65,7 @@ export function loadConfig(env: Env = process.env): Config {
     dbPath: strVar(env, "DB_PATH", DEFAULT_CONFIG.dbPath),
     logFile: logFileVar(env),
     ackRetryMs: intVar(env, "ACK_RETRY_MS", DEFAULT_CONFIG.ackRetryMs, 50, 3_600_000),
+    wsIdleTimeoutS: intVar(env, "WS_IDLE_TIMEOUT_S", DEFAULT_CONFIG.wsIdleTimeoutS, 10, 960),
     defaultRoomMs: intVar(env, "DEFAULT_ROOM_MS", DEFAULT_CONFIG.defaultRoomMs, 1, 86_400_000),
     tzName,
   };
