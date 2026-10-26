@@ -4,6 +4,8 @@ export interface Config {
   port: number;
   host: string;
   dbPath: string;
+  /** File that gets a copy of each log line. null = no file. */
+  logFile: string | null;
   ackRetryMs: number;
   defaultRoomMs: number;
   tzName: string;
@@ -13,6 +15,7 @@ export const DEFAULT_CONFIG: Config = {
   port: 7321,
   host: "0.0.0.0",
   dbPath: "./data/control-room.sqlite",
+  logFile: "./data/server.log",
   ackRetryMs: 2000,
   defaultRoomMs: 300_000,
   tzName: "Europe/Oslo",
@@ -35,6 +38,12 @@ function strVar(env: Env, name: string, fallback: string): string {
   return raw === undefined || raw.trim() === "" ? fallback : raw.trim();
 }
 
+/** LOG_FILE: a path, or "off" for no file. */
+function logFileVar(env: Env): string | null {
+  const value = strVar(env, "LOG_FILE", DEFAULT_CONFIG.logFile ?? "");
+  return value.toLowerCase() === "off" ? null : value;
+}
+
 function validTimeZone(name: string): boolean {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: name });
@@ -51,6 +60,7 @@ export function loadConfig(env: Env = process.env): Config {
     port: intVar(env, "PORT", DEFAULT_CONFIG.port, 0, 65535),
     host: strVar(env, "HOST", DEFAULT_CONFIG.host),
     dbPath: strVar(env, "DB_PATH", DEFAULT_CONFIG.dbPath),
+    logFile: logFileVar(env),
     ackRetryMs: intVar(env, "ACK_RETRY_MS", DEFAULT_CONFIG.ackRetryMs, 50, 3_600_000),
     defaultRoomMs: intVar(env, "DEFAULT_ROOM_MS", DEFAULT_CONFIG.defaultRoomMs, 1, 86_400_000),
     tzName,

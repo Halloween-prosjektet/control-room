@@ -15,6 +15,8 @@
 //    process({type: "outbox_sent"}).
 
 import type { Database } from "bun:sqlite";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Server } from "bun";
 import { type Config, loadConfig } from "./config.ts";
 import { type ConnData, Connections, newConnData } from "./connections.ts";
@@ -27,11 +29,37 @@ import { FEATURE_GAME_FINISH_ACK, msg, type PiId } from "./protocol.ts";
 export type LogLevel = "info" | "warn" | "error";
 export type Logger = (level: LogLevel, message: string) => void;
 
+function formatLine(level: LogLevel, message: string): string {
+  return `${new Date().toISOString()} ${level.toUpperCase()} ${message}`;
+}
+
 export const consoleLogger: Logger = (level, message) => {
-  const line = `${new Date().toISOString()} ${level.toUpperCase()} ${message}`;
+  const line = formatLine(level, message);
   if (level === "info") console.log(line);
   else console.warn(line);
 };
+
+/**
+ * Writes each line to the console and appends it to `path`. A failed write goes to the
+ * console only: logging must never stop the server.
+ */
+export function createFileLogger(path: string): Logger {
+  let failed = false;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+  } catch (err) {
+    consoleLogger("warn", `cannot make the directory of log file ${path}: ${String(err)}`);
+  }
+  return (level, message) => {
+    consoleLogger(level, message);
+    try {
+      appendFileSync(path, `${formatLine(level, message)}\n`);
+    } catch (err) {
+      if (!failed) consoleLogger("warn", `cannot write log file ${path}: ${String(err)}`);
+      failed = true;
+    }
+  };
+}
 
 export interface ServerOptions {
   log?: Logger;
@@ -182,13 +210,14 @@ export function startServer(config: Config, options: ServerOptions = {}): Runnin
 
 if (import.meta.main) {
   const config = loadConfig();
-  const running = startServer(config);
-  consoleLogger(
+  const log = config.logFile === null ? consoleLogger : createFileLogger(config.logFile);
+  const running = startServer(config, { log });
+  log(
     "info",
     `control room server on http://${running.server.hostname}:${running.port} (db ${config.dbPath})`,
   );
   const shutdown = () => {
-    consoleLogger("info", "stopping");
+    log("info", "stopping");
     void running.stop().then(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);

@@ -28,6 +28,7 @@ function config(dbPath: string, ackRetryMs = 100): Config {
     port: 0,
     host: "127.0.0.1",
     dbPath,
+    logFile: null,
     ackRetryMs,
     defaultRoomMs: 300_000,
     tzName: "Europe/Oslo",

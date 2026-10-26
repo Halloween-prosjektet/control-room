@@ -56,6 +56,7 @@ server does not start.
 | `PORT` | `7321` | Port for WebSocket and HTTP. |
 | `HOST` | `0.0.0.0` | Address to listen on. |
 | `DB_PATH` | `./data/control-room.sqlite` | SQLite file. |
+| `LOG_FILE` | `./data/server.log` | File that gets a copy of each log line (appended). `off` = no file. |
 | `ACK_RETRY_MS` | `2000` | Time between two sends of an outbox message. |
 | `DEFAULT_ROOM_MS` | `300000` | Room time estimate when no run has completed the room. The server uses it for `max_wait`. |
 | `TZ_NAME` | `Europe/Oslo` | Time zone for the timestamps that the server sends. |
