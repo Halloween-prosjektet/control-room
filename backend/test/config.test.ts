@@ -11,6 +11,7 @@ describe("config", () => {
         PORT: "8080",
         HOST: "127.0.0.1",
         DB_PATH: "/tmp/x.sqlite",
+        LOG_FILE: "/tmp/x.log",
         ACK_RETRY_MS: "500",
         DEFAULT_ROOM_MS: "60000",
         TZ_NAME: "UTC",
@@ -19,10 +20,15 @@ describe("config", () => {
       port: 8080,
       host: "127.0.0.1",
       dbPath: "/tmp/x.sqlite",
+      logFile: "/tmp/x.log",
       ackRetryMs: 500,
       defaultRoomMs: 60000,
       tzName: "UTC",
     });
+  });
+  test("LOG_FILE=off has no log file", () => {
+    expect(loadConfig({ LOG_FILE: "off" }).logFile).toBeNull();
+    expect(loadConfig({ LOG_FILE: "OFF" }).logFile).toBeNull();
   });
   test("bad values stop the start", () => {
     expect(() => loadConfig({ PORT: "abc" })).toThrow("PORT");
